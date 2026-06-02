@@ -1,0 +1,30 @@
+{
+  "project_info": {
+    "project_number": "688646268629",
+    "firebase_url": "https://talktandem-default-rtdb.firebaseio.com",
+    "project_id": "talktandem",
+    "storage_bucket": "talktandem.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:688646268629:android:66af8eac2f15731df4645c",
+        "android_client_info": {
+          "package_name": "com.example.dostt_connect"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAjtxvpbWT8xyg965DFQ50Km8viAbBDg9w"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
