@@ -1,8 +1,10 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart' hide AuthProvider;
+import 'package:google_mobile_ads/google_mobile_ads.dart';
 import 'package:lucide_icons/lucide_icons.dart';
 import '../../models/auth_provider.dart';
 import '../../models/models.dart';
@@ -11,11 +13,15 @@ import '../../theme/app_theme.dart';
 class PostCallFeedbackScreen extends StatefulWidget {
   final String callId;
   final AppUser partner;
+  final int durationSeconds;
+  final String? disconnectReason;
 
   const PostCallFeedbackScreen({
     super.key,
     required this.callId,
     required this.partner,
+    this.durationSeconds = 0,
+    this.disconnectReason,
   });
 
   @override
@@ -28,6 +34,11 @@ class _PostCallFeedbackScreenState extends State<PostCallFeedbackScreen> {
   bool _isSubmitting = false;
   bool _isSendingFriendRequest = false;
   bool _friendRequestSent = false;
+  
+  // Call Stats and Ads
+  int _callsToday = 0;
+  InterstitialAd? _interstitialAd;
+  RewardedAd? _rewardedAd;
 
   final List<String> _feedbackTags = [
     'Spoke too fast',
@@ -40,8 +51,135 @@ class _PostCallFeedbackScreenState extends State<PostCallFeedbackScreen> {
 
   final Set<String> _selectedTags = {};
 
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      _showLimitNotices();
+      await _processDailyLimitsAndAds();
+    });
+  }
+  
+  void _showLimitNotices() {
+    if (widget.disconnectReason == 'limit_10_min') {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Call reached the 10-minute session limit. Send a friend request to talk longer next time!'),
+        duration: Duration(seconds: 4),
+        backgroundColor: AppTheme.coralAction,
+      ));
+    } else if (widget.disconnectReason == 'limit_daily') {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Your 90-minute daily free limit has been reached. Upgrade to premium for unlimited calls!'),
+        duration: Duration(seconds: 4),
+        backgroundColor: AppTheme.coralAction,
+      ));
+    }
+  }
+
+  Future<void> _processDailyLimitsAndAds() async {
+    final auth = context.read<AuthProvider>();
+    final myPhone = auth.userData?['phoneNumber'] ?? FirebaseAuth.instance.currentUser?.phoneNumber;
+    if (myPhone == null) return;
+
+    final firestore = FirebaseFirestore.instanceFor(app: Firebase.app(), databaseId: 'talktandem');
+    final today = "${DateTime.now().year}-${DateTime.now().month}-${DateTime.now().day}";
+    final userRef = firestore.collection('users').doc(myPhone);
+
+    try {
+      // 1. Transactionally Update Limits
+      await firestore.runTransaction((transaction) async {
+        final snapshot = await transaction.get(userRef);
+        int dailySecs = 0;
+        int callsToday = 0;
+        
+        if (snapshot.data()?['lastCallDate'] == today) {
+          dailySecs = (snapshot.data()?['dailyTalkSeconds'] as num?)?.toInt() ?? 0;
+          callsToday = (snapshot.data()?['dailyCallsCount'] as num?)?.toInt() ?? 0;
+        }
+        
+        dailySecs += widget.durationSeconds;
+        callsToday += 1;
+        
+        transaction.update(userRef, {
+          'dailyTalkSeconds': dailySecs,
+          'dailyCallsCount': callsToday,
+          'lastCallDate': today,
+        });
+        
+        _callsToday = callsToday;
+      });
+
+      // 2. Pre-Load Correct Ad
+      if (_callsToday % 10 == 0) {
+        _loadRewardedAd();
+      } else if (_callsToday % 3 == 0) {
+        _loadInterstitialAd();
+      }
+      
+      // Cleanup WebRTC logic silently in background
+      await auth.firestore.endCallSession(widget.callId, durationMinutes: (widget.durationSeconds / 60).ceil());
+      await auth.loadUserData(auth.uid ?? '');
+      await _cleanupWebRTC(firestore);
+      
+    } catch (e) {
+      debugPrint("[Post Call Stats Error]: $e");
+    }
+  }
+
+  void _loadInterstitialAd() {
+    InterstitialAd.load(
+      adUnitId: Platform.isAndroid ? 'ca-app-pub-3940256099942544/1033173712' : 'ca-app-pub-3940256099942544/4411468910',
+      request: const AdRequest(),
+      adLoadCallback: InterstitialAdLoadCallback(
+        onAdLoaded: (ad) {
+          ad.fullScreenContentCallback = FullScreenContentCallback(
+            onAdDismissedFullScreenContent: (ad) { ad.dispose(); _navigateHome(); },
+            onAdFailedToShowFullScreenContent: (ad, error) { ad.dispose(); _navigateHome(); }
+          );
+          _interstitialAd = ad;
+        },
+        onAdFailedToLoad: (error) => debugPrint('Interstitial Ad failed to load: $error'),
+      ),
+    );
+  }
+
+  void _loadRewardedAd() {
+    RewardedAd.load(
+      adUnitId: Platform.isAndroid ? 'ca-app-pub-3940256099942544/5224354917' : 'ca-app-pub-3940256099942544/1712409664',
+      request: const AdRequest(),
+      rewardedAdLoadCallback: RewardedAdLoadCallback(
+        onAdLoaded: (ad) {
+          ad.fullScreenContentCallback = FullScreenContentCallback(
+            onAdDismissedFullScreenContent: (ad) { ad.dispose(); _navigateHome(); },
+            onAdFailedToShowFullScreenContent: (ad, error) { ad.dispose(); _navigateHome(); }
+          );
+          _rewardedAd = ad;
+        },
+        onAdFailedToLoad: (error) => debugPrint('Rewarded Ad failed to load: $error'),
+      ),
+    );
+  }
+
+  void _processExitAction() {
+    if (_rewardedAd != null) {
+      _rewardedAd!.show(onUserEarnedReward: (ad, reward) {
+        debugPrint("User earned reward");
+      });
+    } else if (_interstitialAd != null) {
+      _interstitialAd!.show();
+    } else {
+      _navigateHome();
+    }
+  }
+
+  void _navigateHome() {
+    if (mounted) {
+      Navigator.of(context).popUntil((route) => route.isFirst);
+    }
+  }
+
   Future<void> _cleanupWebRTC(FirebaseFirestore firestore) async {
-    debugPrint("[TalkTandem Cleanups] Initiating WebRTC signaling document cleanup for callId: ${widget.callId}");
+    debugPrint("[TalkTandem Cleanups] Initiating WebRTC cleanup for callId: ${widget.callId}");
     try {
       final callRef = firestore.collection('calls').doc(widget.callId);
       final callerCands = await callRef.collection('callerCandidates').get();
@@ -53,38 +191,13 @@ class _PostCallFeedbackScreenState extends State<PostCallFeedbackScreen> {
         await doc.reference.delete();
       }
       await callRef.delete();
-      debugPrint("[TalkTandem Cleanups] WebRTC signaling cleanup completed successfully.");
     } catch (cleanupError) {
-      debugPrint("[TalkTandem Cleanups] Warning: signaling cleanup encountered an issue: $cleanupError");
+      debugPrint("[TalkTandem Cleanups] Warning: signaling cleanup issue: $cleanupError");
     }
   }
 
   Future<void> _skipFeedback() async {
-    final auth = context.read<AuthProvider>();
-    final uid = auth.uid;
-    if (uid == null) return;
-
-    setState(() => _isSubmitting = true);
-
-    try {
-      final firestore = FirebaseFirestore.instanceFor(
-        app: Firebase.app(),
-        databaseId: 'talktandem',
-      );
-
-      await firestore.collection('calls').doc(widget.callId).update({'status': 'ended'});
-      await _cleanupWebRTC(firestore);
-
-      if (!mounted) return;
-      Navigator.of(context).popUntil((route) => route.isFirst);
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Could not skip evaluation: $e')),
-      );
-    } finally {
-      if (mounted) setState(() => _isSubmitting = false);
-    }
+    _processExitAction();
   }
 
   Future<void> _sendFriendRequest() async {
@@ -262,8 +375,6 @@ class _PostCallFeedbackScreenState extends State<PostCallFeedbackScreen> {
         databaseId: 'talktandem',
       );
 
-      await firestore.collection('calls').doc(widget.callId).update({'status': 'ended'});
-      
       final partnerPhone = widget.partner.phoneNumber ?? widget.partner.uid;
 
       await firestore.collection('feedback').add({
@@ -292,22 +403,22 @@ class _PostCallFeedbackScreenState extends State<PostCallFeedbackScreen> {
         );
       }
 
-      await _cleanupWebRTC(firestore);
-
       await auth.loadUserData(uid);
-      if (!mounted) return;
-      Navigator.of(context).popUntil((route) => route.isFirst);
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Thanks! +25 XP earned for your feedback.')),
-      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Thanks! +25 XP earned for your feedback.')),
+        );
+      }
+      
+      _processExitAction();
+      
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Could not save feedback: $e')),
       );
-    } finally {
-      if (mounted) setState(() => _isSubmitting = false);
-    }
+      setState(() => _isSubmitting = false);
+    } 
   }
 
   ImageProvider? _getAvatarProvider(String? avatarUrl) {

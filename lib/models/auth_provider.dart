@@ -33,7 +33,7 @@ class AuthProvider extends ChangeNotifier {
       
       _user = user;
       
-      if (user != null) {
+      if (user != null) { 
         // Since we are strictly using the phone number as the document ID, we get the verified phone number
         final phone = user.phoneNumber;
         
@@ -326,4 +326,5 @@ class AuthProvider extends ChangeNotifier {
     _userDocSubscription?.cancel();
     super.dispose();
   }
+  
 }

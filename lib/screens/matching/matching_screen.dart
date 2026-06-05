@@ -10,6 +10,9 @@ import '../../models/auth_provider.dart';
 import '../../models/models.dart'; 
 import '../../theme/app_theme.dart';
 import '../../widgets/premium_bottom_sheet.dart';
+import '../../widgets/admob_banner_widget.dart';
+
+// FIXED IMPORT PATH HERE:
 import 'active_call_screen.dart';
 
 class MatchingScreen extends StatefulWidget {
@@ -189,6 +192,27 @@ class _MatchingScreenState extends State<MatchingScreen> with SingleTickerProvid
       });
       _cleanupMatchmaking();
       await _firestore.collection('matchmaking_pool').doc(phone).delete();
+      return;
+    }
+
+    // Daily Limit Check Before Searching
+    final today = "${DateTime.now().year}-${DateTime.now().month}-${DateTime.now().day}";
+    final lastCallDate = auth.userData?['lastCallDate'] as String?;
+    final isPremium = (auth.userData?['isPremium'] as bool?) ?? false;
+    
+    int dailyTalkSeconds = 0;
+    if (lastCallDate == today) {
+      dailyTalkSeconds = (auth.userData?['dailyTalkSeconds'] as num?)?.toInt() ?? 0;
+    }
+
+    if (!isPremium && dailyTalkSeconds >= 90 * 60) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Daily free limit of 90 minutes reached. Connect with friends directly or wait until tomorrow!'),
+          backgroundColor: AppTheme.coralAction,
+          duration: Duration(seconds: 5),
+        ),
+      );
       return;
     }
 
@@ -520,27 +544,13 @@ class _MatchingScreenState extends State<MatchingScreen> with SingleTickerProvid
             ),
           ),
           
-          if (_isSearching) ...[
-            Center(
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-                decoration: BoxDecoration(
-                  color: AppTheme.tealAccent.withValues(alpha: 0.1),
-                  borderRadius: BorderRadius.circular(16),
-                ),
-                child: Text(
-                  "Estimated wait time: $_searchTimeRemaining s",
-                  style: const TextStyle(
-                    color: AppTheme.tealAccent,
-                    fontSize: 14,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-              ),
-            ),
-            const SizedBox(height: 12),
-          ],
-
+          Container(
+            width: double.infinity,
+            alignment: Alignment.center,
+            margin: const EdgeInsets.symmetric(vertical: 8.0),
+            child: const AdmobBannerWidget(), 
+          ),
+          
           Padding(
             padding: const EdgeInsets.fromLTRB(24, 0, 24, 8),
             child: Center(
@@ -571,7 +581,10 @@ class _MatchingScreenState extends State<MatchingScreen> with SingleTickerProvid
               child: ElevatedButton.icon(
                 onPressed: _connectingToPartnerName != null ? null : _toggleSearch,
                 icon: Icon(_isSearching ? LucideIcons.phoneOff : LucideIcons.phone, size: 22),
-                label: Text(_isSearching ? 'Stop Call' : 'Start Call', style: const TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
+                label: Text(
+                  _isSearching ? 'Stop Search • $_searchTimeRemaining s' : 'Start Call', 
+                  style: const TextStyle(fontSize: 17, fontWeight: FontWeight.bold)
+                ),
                 style: ElevatedButton.styleFrom(
                   backgroundColor: _isSearching ? AppTheme.coralAction : AppTheme.tealAccent,
                   foregroundColor: Colors.white,

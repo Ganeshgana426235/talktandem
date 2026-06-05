@@ -13,6 +13,7 @@ import '../../theme/app_theme.dart';
 import '../../widgets/report_bottom_sheet.dart';
 import '../../widgets/premium_bottom_sheet.dart';
 import '../../models/models.dart';
+import '../../widgets/admob_banner_widget.dart';
 import 'post_call_feedback_screen.dart';
 
 class ActiveCallScreen extends StatefulWidget {
@@ -44,6 +45,10 @@ class _ActiveCallScreenState extends State<ActiveCallScreen> with SingleTickerPr
   bool _isSpeakerPhone = true;
   int _selectedActivityIndex = 0; // 0: Topics, 1: Games
   
+  // Daily Talk Trackers
+  int _startDailySeconds = 0;
+  bool _isPremium = false;
+
   // WebRTC Description Sync Gate
   bool _hasRemoteDescriptionSet = false; 
   final List<RTCIceCandidate> _queuedRemoteIceCandidates = [];
@@ -97,7 +102,7 @@ class _ActiveCallScreenState extends State<ActiveCallScreen> with SingleTickerPr
 
   // --- Synced Game State Properties ---
   late String _currentTopic;
-  String _activeGameType = "none"; // 'none', 'pending_word_guess', 'word_guess', 'trivia'
+  String _activeGameType = "none";
   
   // Game Invitations
   String _gameInviterId = "";
@@ -139,11 +144,17 @@ class _ActiveCallScreenState extends State<ActiveCallScreen> with SingleTickerPr
     super.initState();
     debugPrint("========== 🛠️ TALKTANDEM AUDIO DIAGNOSTICS STARTING ==========");
     
-    // Pick an initial random topic locally
+    // Fetch initial limits mapping for limits tracker
+    final auth = context.read<AuthProvider>();
+    final today = "${DateTime.now().year}-${DateTime.now().month}-${DateTime.now().day}";
+    if (auth.userData?['lastCallDate'] == today) {
+      _startDailySeconds = (auth.userData?['dailyTalkSeconds'] as num?)?.toInt() ?? 0;
+    }
+    _isPremium = (auth.userData?['isPremium'] as bool?) ?? false;
+    
     final random = Random();
     _currentTopic = _topicsDataset[random.nextInt(_topicsDataset.length)];
 
-    // Keep screen awake to prevent the OS from killing background microphone access
     KeepScreenOn.turnOn();
     
     _soundWaveController = AnimationController(
@@ -165,7 +176,7 @@ class _ActiveCallScreenState extends State<ActiveCallScreen> with SingleTickerPr
 
   @override
   void dispose() {
-    KeepScreenOn.turnOff(); // Release wakelock when exiting
+    KeepScreenOn.turnOff();
     _callDurationTimer?.cancel();
     _diagnosticTimer?.cancel();
     _signalingSubscription?.cancel();
@@ -180,7 +191,18 @@ class _ActiveCallScreenState extends State<ActiveCallScreen> with SingleTickerPr
   void _startTimer() {
     _callDurationTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
       if (mounted && _hasRemoteDescriptionSet) {
-        setState(() => _secondsElapsed++);
+        setState(() {
+          _secondsElapsed++;
+
+          // Limit Disconnection Checks
+          if (_secondsElapsed >= 10 * 60) {
+            // 10 Min Hard Session Limit hit
+            _endCallLocally(reason: 'limit_10_min');
+          } else if (!_isPremium && (_startDailySeconds + _secondsElapsed) >= 90 * 60) {
+            // 90 Min Global Daily Free Limit Hit
+            _endCallLocally(reason: 'limit_daily');
+          }
+        });
       }
     });
   }
@@ -217,7 +239,7 @@ class _ActiveCallScreenState extends State<ActiveCallScreen> with SingleTickerPr
           'noiseSuppression': true,
           'autoGainControl': true,
         },
-        'video': false // Strictly no video
+        'video': false 
       });
 
       _peerConnection = await createPeerConnection(_iceConfiguration);
@@ -230,7 +252,7 @@ class _ActiveCallScreenState extends State<ActiveCallScreen> with SingleTickerPr
         if (state == RTCIceConnectionState.RTCIceConnectionStateDisconnected ||
             state == RTCIceConnectionState.RTCIceConnectionStateFailed ||
             state == RTCIceConnectionState.RTCIceConnectionStateClosed) {
-          _endCallLocally();
+          _endCallLocally(reason: 'disconnected');
         }
       };
       
@@ -284,7 +306,7 @@ class _ActiveCallScreenState extends State<ActiveCallScreen> with SingleTickerPr
 
       _signalingSubscription = callDocRef.snapshots().listen((snapshot) async {
         if (!snapshot.exists) {
-          if (_hasRemoteDescriptionSet) _endCallLocally();
+          if (_hasRemoteDescriptionSet) _endCallLocally(reason: 'disconnected');
           return;
         }
         
@@ -292,7 +314,7 @@ class _ActiveCallScreenState extends State<ActiveCallScreen> with SingleTickerPr
         if (data == null) return;
         
         if (data['status'] == 'ended') {
-          _endCallLocally();
+          _endCallLocally(reason: 'ended_by_partner');
           return;
         }
 
@@ -303,14 +325,12 @@ class _ActiveCallScreenState extends State<ActiveCallScreen> with SingleTickerPr
           
           final myPhone = context.read<AuthProvider>().appUser?.phoneNumber ?? "";
 
-          // Game Invitation Dialog Logic
           if (newGameType.startsWith('pending_') && inviterId != myPhone) {
             if (!_isShowingInviteDialog) {
               _isShowingInviteDialog = true;
               _showInviteDialog(newGameType.replaceAll('pending_', ''), inviterName);
             }
           } else if (newGameType == 'none' && _isShowingInviteDialog) {
-            // Invite was canceled by the inviter or game ended
             Navigator.of(context, rootNavigator: true).pop();
             _isShowingInviteDialog = false;
           }
@@ -387,7 +407,6 @@ class _ActiveCallScreenState extends State<ActiveCallScreen> with SingleTickerPr
     }
   }
 
-  // Purely Local Topics Logic - Individual to each user
   void _nextTopic() {
     final random = Random();
     String nextTopic = _topicsDataset[random.nextInt(_topicsDataset.length)];
@@ -399,7 +418,6 @@ class _ActiveCallScreenState extends State<ActiveCallScreen> with SingleTickerPr
     });
   }
 
-  // --- Real-time Gaming Invitation & Launch Logic ---
   Future<void> _inviteToGame(String gameType) async {
     final myPhone = context.read<AuthProvider>().appUser?.phoneNumber ?? "";
     final myName = context.read<AuthProvider>().appUser?.name ?? "Your partner";
@@ -429,7 +447,7 @@ class _ActiveCallScreenState extends State<ActiveCallScreen> with SingleTickerPr
             onPressed: () {
               Navigator.pop(ctx);
               _isShowingInviteDialog = false;
-              _exitGame(); // Declines and resets game state
+              _exitGame(); 
             },
             child: const Text('Decline', style: TextStyle(color: AppTheme.coralAction)),
           ),
@@ -619,21 +637,24 @@ class _ActiveCallScreenState extends State<ActiveCallScreen> with SingleTickerPr
     try {
       await _firestore.collection('calls').doc(widget.callId).update({'status': 'ended'});
     } catch (_) {}
-    _endCallLocally();
+    _endCallLocally(reason: 'user_ended');
   }
 
-  void _endCallLocally() {
+  void _endCallLocally({String? reason}) {
     if (!mounted) return;
     if (_isShowingInviteDialog) {
       Navigator.of(context, rootNavigator: true).pop();
       _isShowingInviteDialog = false;
     }
     _cleanupResources();
+    
     Navigator.of(context).pushReplacement(
       MaterialPageRoute(
         builder: (_) => PostCallFeedbackScreen(
           callId: widget.callId,
           partner: widget.partner,
+          durationSeconds: _secondsElapsed,
+          disconnectReason: reason,
         ),
       ),
     );
@@ -659,6 +680,19 @@ class _ActiveCallScreenState extends State<ActiveCallScreen> with SingleTickerPr
     
     final bool isFullScreenGame = _activeGameType == 'word_guess' || _activeGameType == 'trivia';
 
+    // Advanced Formatting For Time Remaining UI
+    int callRemaining = (10 * 60) - _secondsElapsed;
+    if(callRemaining < 0) callRemaining = 0;
+    
+    int dailyRemaining = 0;
+    if(!_isPremium) {
+       dailyRemaining = (90 * 60) - (_startDailySeconds + _secondsElapsed);
+       if(dailyRemaining < 0) dailyRemaining = 0;
+    }
+
+    String callTimeStr = "${(callRemaining ~/ 60).toString().padLeft(2,'0')}:${(callRemaining % 60).toString().padLeft(2,'0')}";
+    String dailyTimeStr = _isPremium ? "Unlimited" : "${(dailyRemaining ~/ 60).toString().padLeft(2,'0')}:${(dailyRemaining % 60).toString().padLeft(2,'0')}";
+
     // FULL SCREEN GAME MODE UI
     if (isFullScreenGame) {
       return PopScope(
@@ -672,16 +706,22 @@ class _ActiveCallScreenState extends State<ActiveCallScreen> with SingleTickerPr
           body: SafeArea(
             child: Column(
               children: [
-                // Mini Header for keeping call controls visible
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
                   color: surfaceColor,
                   child: Row(
                     children: [
-                      _buildStatIndicator(
-                        icon: LucideIcons.clock,
-                        value: _getFormattedDuration(),
-                        color: AppTheme.tealAccent,
+                      Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          _buildStatIndicator(
+                            icon: LucideIcons.clock,
+                            value: "${_getFormattedDuration()} / 10:00",
+                            color: AppTheme.tealAccent,
+                          ),
+                          const SizedBox(height: 4),
+                          Text("Daily left: $dailyTimeStr", style: TextStyle(color: textSecondary, fontSize: 10, fontWeight: FontWeight.bold)),
+                        ],
                       ),
                       const Spacer(),
                       Row(
@@ -700,7 +740,6 @@ class _ActiveCallScreenState extends State<ActiveCallScreen> with SingleTickerPr
                     ],
                   ),
                 ),
-                // Expanded Interactive Game Console
                 Expanded(
                   child: Container(
                     color: scaffoldBg,
@@ -733,11 +772,18 @@ class _ActiveCallScreenState extends State<ActiveCallScreen> with SingleTickerPr
                 color: surfaceColor,
                 child: Row(
                   children: [
-                    _buildStatIndicator(
-                      icon: LucideIcons.clock,
-                      value: _getFormattedDuration(),
-                      color: AppTheme.tealAccent,
-                    ),
+                    Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          _buildStatIndicator(
+                            icon: LucideIcons.clock,
+                            value: "${_getFormattedDuration()} (Left: $callTimeStr)",
+                            color: AppTheme.tealAccent,
+                          ),
+                          const SizedBox(height: 4),
+                          Text("Daily pool remaining: $dailyTimeStr", style: TextStyle(color: textSecondary, fontSize: 11, fontWeight: FontWeight.bold)),
+                        ],
+                      ),
                     const Spacer(),
                     Container(
                       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
@@ -1096,6 +1142,12 @@ class _ActiveCallScreenState extends State<ActiveCallScreen> with SingleTickerPr
                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
               ),
             ),
+          ),
+          const SizedBox(height: 12),
+          Container(
+            width: double.infinity,
+            alignment: Alignment.center,
+            child: const AdmobBannerWidget(), 
           ),
         ],
       ),

@@ -105,6 +105,11 @@ class _AuthScreenState extends State<AuthScreen> {
     super.initState();
     print("[TalkTandem AuthUI] AuthScreen initializing. Restoring persistent state.");
 
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      // Legacy force logout detection is not available on AuthProvider.
+      // Any explicit logout messaging should be handled by the provider or auth flow.
+    });
+
     // Clean start guard: If no active Firebase user is found, force clear stale static caches to avoid UI loop locks
     if (FirebaseAuth.instance.currentUser == null) {
       print("[TalkTandem AuthUI] No active Firebase session detected. Force resetting persistent state to Phone Input.");

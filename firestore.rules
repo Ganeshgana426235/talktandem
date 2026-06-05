@@ -19,6 +19,17 @@ service cloud.firestore {
       allow create: if isOwner(userId);
       allow update: if isOwner(userId);
       allow delete: if false;
+
+      // Nested subcollections
+      match /friend_requests/{requestId} {
+        allow read, write: if isSignedIn();
+      }
+      match /friends/{friendId} {
+        allow read, write: if isSignedIn();
+      }
+      match /call_history/{callId} {
+        allow read, write: if isSignedIn();
+      }
     }
 
     match /conversations/{conversationId} {
@@ -32,6 +43,9 @@ service cloud.firestore {
           && request.auth.uid in get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantIds;
         allow create: if isSignedIn()
           && request.auth.uid == request.resource.data.senderId
+          && request.auth.uid in get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantIds;
+        allow update, delete: if isSignedIn()
+          && request.auth.uid == resource.data.senderId
           && request.auth.uid in get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantIds;
       }
     }

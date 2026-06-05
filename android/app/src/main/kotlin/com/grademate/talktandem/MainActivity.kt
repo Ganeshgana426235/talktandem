@@ -1,4 +1,4 @@
-package com.example.dostt_connect
+package com.grademate.talktandem
 
 import io.flutter.embedding.android.FlutterActivity
 
