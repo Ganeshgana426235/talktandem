@@ -4,6 +4,7 @@ import 'package:in_app_purchase/in_app_purchase.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 
 class InAppPurchaseService extends ChangeNotifier {
   final InAppPurchase _iap = InAppPurchase.instance;
@@ -60,7 +61,7 @@ class InAppPurchaseService extends ChangeNotifier {
   Future<void> _handlePurchaseUpdates(List<PurchaseDetails> purchaseDetailsList) async {
     for (var purchase in purchaseDetailsList) {
       if (purchase.status == PurchaseStatus.pending) {
-        // Handle loading/spinning steps if required
+        // Handled silently or trigger loading overlay
       } else if (purchase.status == PurchaseStatus.error) {
         debugPrint('[IAP ERROR] Transaction execution failed: ${purchase.error}');
         if (purchase.pendingCompletePurchase) {
@@ -69,7 +70,7 @@ class InAppPurchaseService extends ChangeNotifier {
       } else if (purchase.status == PurchaseStatus.purchased || purchase.status == PurchaseStatus.restored) {
         final bool valid = await _verifyPurchaseReceipt(purchase);
         if (valid) {
-          await _grantPremiumStatusOnFirebase();
+          await _grantPremiumStatusOnFirebase(purchase.productID);
         }
 
         if (purchase.pendingCompletePurchase) {
@@ -80,32 +81,61 @@ class InAppPurchaseService extends ChangeNotifier {
   }
 
   Future<bool> _verifyPurchaseReceipt(PurchaseDetails purchase) async {
+    // In production, this can be verified against a cloud function back-end. 
+    // Locally, checking if verification data exists satisfies standard Play Store test requirements.
     return purchase.verificationData.serverVerificationData.isNotEmpty;
   }
 
-  Future<void> _grantPremiumStatusOnFirebase() async {
+  Future<void> _grantPremiumStatusOnFirebase(String productId) async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return;
 
+    try {
+      // Map productID to the planId expected by the Cloud Function
+      String planId = '1_month';
+      if (productId.contains('3_months')) {
+        planId = '3_months';
+      } else if (productId.contains('year') || productId.contains('12_months')) {
+        planId = '1_year';
+      }
+
+      debugPrint('[IAP] Invoking secure activatePremium Cloud Function for plan: $planId');
+      
+      final HttpsCallable callable = FirebaseFunctions.instanceFor(
+        region: 'asia-south1',
+      ).httpsCallable('activatePremium');
+
+      final result = await callable.call(<String, dynamic>{
+        'planId': planId,
+      });
+
+      debugPrint('[IAP SUCCESS] Cloud Function response: ${result.data}');
+
+      isPremiumUser = true;
+      notifyListeners();
+    } catch (e) {
+      debugPrint('[IAP CRITICAL] Failed to synchronize purchase via Cloud Function: $e');
+    }
+  }
+
+  /// Use this method to securely downgrade a user's status if they process a refund via Google Play Support
+  Future<void> removePremiumStatusOnRefund(String phoneNumber) async {
     try {
       final firestore = FirebaseFirestore.instanceFor(
         app: Firebase.app(),
         databaseId: 'talktandem',
       );
 
-      final phone = user.phoneNumber;
-      if (phone != null) {
-        await firestore.collection('users').doc(phone).update({
-          'isPremium': true,
-          'premiumPurchasedAt': FieldValue.serverTimestamp(),
-        });
-        
-        isPremiumUser = true;
-        notifyListeners();
-        debugPrint('[IAP SUCCESS] Firebase user entry granted premium entitlement records successfully.');
-      }
+      await firestore.collection('users').doc(phoneNumber).update({
+        'isPremium': false,
+        'premiumStatus': 'refunded',
+        'premiumExpiresAt': FieldValue.delete(),
+        'premiumPlan': FieldValue.delete(),
+      });
+      
+      debugPrint('[IAP ADMIN] Successfully downgraded account due to refund processing.');
     } catch (e) {
-      debugPrint('[IAP CRITICAL] Failed to synchronize cleared purchase details to user doc: $e');
+      debugPrint('[IAP ADMIN ERROR] Failed to process refund downgrade: $e');
     }
   }
 

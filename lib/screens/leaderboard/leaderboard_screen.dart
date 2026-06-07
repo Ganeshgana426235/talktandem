@@ -142,7 +142,7 @@ class _RankingList extends StatelessWidget {
         
         final myUserData = auth.userData;
         final myName = myUserData?['name'] as String? ?? 'You';
-        final myXp = myUserData?['xp'] as num? ?? 0;
+        final myCoins = myUserData?['coins'] as num? ?? 0;
         final myStreak = myUserData?['streak'] as num? ?? 0;
         final myAvatar = myUserData?['avatarUrl'] as String?;
 
@@ -267,13 +267,13 @@ class _RankingList extends StatelessWidget {
                         Column(
                           crossAxisAlignment: CrossAxisAlignment.end,
                           children: [
-                            Text('Total XP',
+                            Text('Total Coins',
                                 style: TextStyle(color: textSecondary, fontSize: 10)),
                             Text(
-                              '${user.xp}',
+                              '${user.coins}',
                               style: const TextStyle(
                                 fontWeight: FontWeight.bold,
-                                color: AppTheme.tealAccent,
+                                color: Colors.amber,
                                 fontSize: 16,
                               ),
                             ),
@@ -355,12 +355,12 @@ class _RankingList extends StatelessWidget {
                     Column(
                       crossAxisAlignment: CrossAxisAlignment.end,
                       children: [
-                        Text('Total XP', style: TextStyle(color: textSecondary, fontSize: 10)),
+                        Text('Total Coins', style: TextStyle(color: textSecondary, fontSize: 10)),
                         Text(
-                          '$myXp XP',
+                          '$myCoins Coins',
                           style: const TextStyle(
                             fontWeight: FontWeight.bold,
-                            color: AppTheme.tealAccent,
+                            color: Colors.amber,
                             fontSize: 16,
                           ),
                         ),

@@ -5,6 +5,9 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_storage/firebase_storage.dart';
+import 'package:cloud_functions/cloud_functions.dart'; // Added for secure premium activation
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import '../services/firestore_service.dart';
 import 'models.dart';
 
@@ -18,6 +21,7 @@ class AuthProvider extends ChangeNotifier {
   bool _isLoading = false;
   bool _isRegistering = false; // Tracks if the user is currently in the active registration form
   StreamSubscription<DocumentSnapshot>? _userDocSubscription;
+  String? _logoutReason;
 
   AuthProvider() {
     _isLoading = true;
@@ -40,10 +44,33 @@ class AuthProvider extends ChangeNotifier {
         if (phone != null && phone.isNotEmpty) {
           print("[TalkTandem AuthProvider] Active session detected. Initializing real-time profile listener for phone: $phone");
           
+          // Secure single device login: update currentDeviceId and FCM token for the device
+          _updateDeviceAndFcmToken(phone);
+          
           _userDocSubscription = _db.collection('users').doc(phone).snapshots().listen((doc) async {
             if (doc.exists) {
               _userData = doc.data();
-              print("[TalkTandem AuthProvider] Real-time profile update: ${_userData?['name']}, XP: ${_userData?['xp']}");
+              print("[TalkTandem AuthProvider] Real-time profile update: ${_userData?['name']}, Coins: ${_userData?['coins']}");
+              
+              // Validate device ID for single-device logging
+              final dbDeviceId = _userData?['currentDeviceId'] as String?;
+              final myDeviceId = await _getOrCreateDeviceId();
+              if (dbDeviceId != null && dbDeviceId.isNotEmpty && dbDeviceId != myDeviceId) {
+                print("[TalkTandem AuthProvider] Single-device conflict detected! DB Device: $dbDeviceId, My Device: $myDeviceId. Logging out...");
+                
+                // Clear state, cancel listener, and log out
+                _userDocSubscription?.cancel();
+                _userDocSubscription = null;
+                _userData = null;
+                _user = null;
+                await _auth.signOut();
+                
+                _logoutReason = "Logged out because your account was signed in on another device.";
+                _isLoading = false;
+                notifyListeners();
+                return;
+              }
+
               _isLoading = false;
               notifyListeners();
             } else {
@@ -186,6 +213,46 @@ class AuthProvider extends ChangeNotifier {
     }
   }
 
+  // Persistent Local Device ID Helper
+  Future<String> _getOrCreateDeviceId() async {
+    final prefs = await SharedPreferences.getInstance();
+    String? deviceId = prefs.getString('current_device_id');
+    if (deviceId == null) {
+      deviceId = "${DateTime.now().microsecondsSinceEpoch}_${uid ?? 'user'}_${StackTrace.current.hashCode}";
+      await prefs.setString('current_device_id', deviceId);
+    }
+    return deviceId;
+  }
+
+  // Device ID and FCM Token Firestore Synchronization
+  Future<void> _updateDeviceAndFcmToken(String phone) async {
+    try {
+      final deviceId = await _getOrCreateDeviceId();
+      String? fcmToken;
+      try {
+        fcmToken = await FirebaseMessaging.instance.getToken();
+        print("[TalkTandem AuthProvider] Collected FCM Token successfully: $fcmToken");
+      } catch (e) {
+        print("[TalkTandem AuthProvider] Warning collecting FCM token: $e");
+      }
+
+      await _db.collection('users').doc(phone).set({
+        'currentDeviceId': deviceId,
+        if (fcmToken != null) 'fcmToken': fcmToken,
+      }, SetOptions(merge: true));
+      print("[TalkTandem AuthProvider] Device ID ($deviceId) and FCM Token updated on Firestore.");
+    } catch (e) {
+      print("[TalkTandem AuthProvider] Error updating Device/FCM details: $e");
+    }
+  }
+
+  String? get logoutReason => _logoutReason;
+
+  void clearLogoutReason() {
+    _logoutReason = null;
+    notifyListeners();
+  }
+
   // Register a new user in Firestore under exactly ONE phone number document ID
   Future<void> registerUser({
     required String uid,
@@ -201,6 +268,14 @@ class AuthProvider extends ChangeNotifier {
     print("[TalkTandem AuthProvider] registerUser initiated for phone: $phoneNumber");
     setLoading(true);
     try {
+      final deviceId = await _getOrCreateDeviceId();
+      String? fcmToken;
+      try {
+        fcmToken = await FirebaseMessaging.instance.getToken();
+      } catch (e) {
+        print("[TalkTandem AuthProvider] Warning getting FCM Token: $e");
+      }
+
       final data = {
         'uid': uid,
         'name': name,
@@ -212,10 +287,12 @@ class AuthProvider extends ChangeNotifier {
         'phoneNumber': phoneNumber,
         'avatarUrl': avatarUrl ?? '', // Dynamic verified avatar URL
         'createdAt': FieldValue.serverTimestamp(),
-        'xp': 450, // Initial signup bonus
+        'coins': 450, // Initial signup bonus
         'streak': 1,
         'conversationsCount': 0,
         'avgRating': 5.0,
+        'currentDeviceId': deviceId,
+        if (fcmToken != null) 'fcmToken': fcmToken,
       };
       
       print("[TalkTandem AuthProvider] Writing new user profile data to Firestore strictly under phone Doc ID: $phoneNumber...");
@@ -230,6 +307,31 @@ class AuthProvider extends ChangeNotifier {
       rethrow;
     } finally {
       setLoading(false);
+    }
+  }
+
+  // Precise and Secure Premium Upgrader Method
+  // Call this after Google Play confirms successful payment in the payment screen.
+  Future<void> activatePremiumSubscription(String planId) async {
+    final phone = _userData?['phoneNumber'] ?? _auth.currentUser?.phoneNumber;
+    if (phone == null) return;
+
+    try {
+      print("[TalkTandem AuthProvider] Calling Cloud Function to activate $planId Premium...");
+      
+      // Call the secure Cloud Function instead of direct Firestore write
+      final HttpsCallable callable = FirebaseFunctions.instanceFor(region: 'asia-south1').httpsCallable('activatePremium');
+      
+      final result = await callable.call(<String, dynamic>{
+        'planId': planId,
+      });
+
+      print("[TalkTandem AuthProvider] Cloud Function Success: ${result.data}");
+      
+      // Reload cache to instantly update UI after the server makes the change
+      await loadUserData(phone);
+    } catch (e) {
+      print("[TalkTandem AuthProvider] ERROR calling activatePremium function: $e");
     }
   }
 
@@ -326,5 +428,4 @@ class AuthProvider extends ChangeNotifier {
     _userDocSubscription?.cancel();
     super.dispose();
   }
-  
 }

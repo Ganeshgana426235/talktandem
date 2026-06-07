@@ -19,14 +19,16 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
+// Added WidgetsBindingObserver to detect when app opens/closes
+class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   int _currentIndex = 0;
   
-  // Real-time state subscription properties
   int _streak = 0;
-  int _xp = 0;
+  int _coins = 0;
   bool _isPremium = false;
+  
   StreamSubscription<DocumentSnapshot>? _userSubscription;
+  Timer? _presenceTimer; // Timer for 5-minute heartbeat
 
   final List<Widget> _tabs = const [
     MatchingScreen(),
@@ -38,127 +40,145 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this); // Listen to app lifecycle
+    
     WidgetsBinding.instance.addPostFrameCallback((_) async {
-      final auth = context.read<AuthProvider>();
-      final uid = auth.uid;
-      if (uid != null) {
-        // Guaranteed active presence mapping specifically to our 'talktandem' custom database configuration target
-        try {
-          final firestore = FirebaseFirestore.instanceFor(app: Firebase.app(), databaseId: 'talktandem');
-          
-          // Direct authenticated phone session mapping is required to guarantee correct document lookup by Phone ID
-          final phone = FirebaseAuth.instance.currentUser?.phoneNumber ?? auth.userData?['phoneNumber'];
-          
-          if (phone == null) {
-            debugPrint("[SYSTEM PRESENCE WARNING] Phone number not found. Cannot load user document by Phone ID.");
-            return;
-          }
-
-          final userDocRef = firestore.collection('users').doc(phone);
-
-          // 1. Establish immediate real-time listener to keep UI stats fully reactive and current
-          _userSubscription?.cancel();
-          _userSubscription = userDocRef.snapshots().listen((snapshot) {
-            if (mounted && snapshot.exists) {
-              final data = snapshot.data() as Map<String, dynamic>?;
-              if (data != null) {
-                setState(() {
-                  _streak = (data['streak'] as num?)?.toInt() ?? 0;
-                  _xp = (data['xp'] as num?)?.toInt() ?? 0;
-                  _isPremium = (data['isPremium'] as bool?) ?? false;
-                });
-              }
-            }
-          });
-
-          final userDoc = await userDocRef.get();
-          final now = DateTime.now();
-          final today = DateTime(now.year, now.month, now.day);
-
-          int streak = 0;
-          int maxStreak = 0;
-          Timestamp? lastOnlineTimestamp;
-
-          if (userDoc.exists) {
-            final data = userDoc.data();
-            if (data != null) {
-              streak = (data['streak'] as num?)?.toInt() ?? 0;
-              maxStreak = (data['maxStreak'] as num?)?.toInt() ?? 0;
-              lastOnlineTimestamp = data['lastOnline'] as Timestamp?;
-            }
-          }
-
-          if (lastOnlineTimestamp != null) {
-            final lastOnlineDate = lastOnlineTimestamp.toDate();
-            final lastDate = DateTime(lastOnlineDate.year, lastOnlineDate.month, lastOnlineDate.day);
-            final difference = today.difference(lastDate).inDays;
-
-            if (difference == 1) {
-              // Consecutive days online: Increment current streak
-              streak += 1;
-              if (streak > maxStreak) {
-                maxStreak = streak;
-              }
-              debugPrint("[STREAK ENGINE] Consecutive check passed. Streak incremented to: $streak");
-            } else if (difference > 1) {
-              // Missed days: Reset streak to 1
-              streak = 1;
-              if (streak > maxStreak) {
-                maxStreak = streak;
-              }
-              debugPrint("[STREAK ENGINE] Missed days detected. Streak reset to: 1");
-            } else if (difference == 0 && streak == 0) {
-              // Edge case: User is logging in for first time today but has 0 streak
-              streak = 1;
-              if (streak > maxStreak) {
-                maxStreak = streak;
-              }
-            }
-            // If difference == 0 (already came online today), we keep the current streak values unchanged
-          } else {
-            // First time login with no prior history: Initialize streak to 1
-            streak = 1;
-            maxStreak = 1;
-            debugPrint("[STREAK ENGINE] Initialized new user streak to 1.");
-          }
-
-          // Update Firestore safely under the main custom DB target (supports both merge/set if doc missing)
-          final writeData = {
-            'isOnline': true,
-            'streak': streak,
-            'maxStreak': maxStreak,
-            'lastOnline': Timestamp.fromDate(now),
-          };
-
-          if (userDoc.exists) {
-            await userDocRef.update(writeData);
-          } else {
-            await userDocRef.set(writeData, SetOptions(merge: true));
-          }
-          
-          debugPrint("[SYSTEM PRESENCE & STREAK] Updated successfully on Firestore.");
-
-          // Sync the newly calculated values directly into the current AuthProvider state context
-          await auth.loadUserData(uid);
-
-        } catch (e) {
-          debugPrint("[SYSTEM PRESENCE WARNING] Presence/Streak update failed: $e");
-        }
-        
-        try {
-          context.read<AuthProvider>().firestore.setUserOnline(uid, true);
-        } catch (_) {}
-      }
+      _setupUserStreamAndStreak();
+      _startPresenceHeartbeat();
     });
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _userSubscription?.cancel();
+    _presenceTimer?.cancel();
+    _setOnlineStatus(false); // Instantly offline when widget is destroyed
     super.dispose();
   }
 
-  // Safe asset/network helper with user-friendly fallback
+  // Detects if user minimizes the app, closes it, or opens it back up
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _setOnlineStatus(true);
+      _startPresenceHeartbeat();
+    } else if (state == AppLifecycleState.paused || 
+               state == AppLifecycleState.detached || 
+               state == AppLifecycleState.inactive) {
+      _setOnlineStatus(false);
+      _presenceTimer?.cancel();
+    }
+  }
+
+  void _startPresenceHeartbeat() {
+    _presenceTimer?.cancel();
+    _setOnlineStatus(true);
+    // Ping Firestore every 3 minutes to confirm user is actively looking at the screen
+    _presenceTimer = Timer.periodic(const Duration(minutes: 3), (_) {
+      _setOnlineStatus(true);
+    });
+  }
+
+  Future<void> _setOnlineStatus(bool isOnline) async {
+    try {
+      final auth = context.read<AuthProvider>();
+      final uid = auth.uid;
+      final phone = FirebaseAuth.instance.currentUser?.phoneNumber ?? auth.userData?['phoneNumber'];
+      
+      if (phone != null) {
+        final firestore = FirebaseFirestore.instanceFor(app: Firebase.app(), databaseId: 'talktandem');
+        await firestore.collection('users').doc(phone).set({
+          'isOnline': isOnline,
+          'lastActive': FieldValue.serverTimestamp(), // Crucial for our Cloud Function
+        }, SetOptions(merge: true));
+      }
+      
+      if (uid != null && isOnline) {
+         auth.firestore.setUserOnline(uid, isOnline);
+      }
+    } catch (e) {
+      debugPrint("[PRESENCE ENGINE] Failed to update presence: $e");
+    }
+  }
+
+  Future<void> _setupUserStreamAndStreak() async {
+    final auth = context.read<AuthProvider>();
+    final uid = auth.uid;
+    if (uid != null) {
+      try {
+        final firestore = FirebaseFirestore.instanceFor(app: Firebase.app(), databaseId: 'talktandem');
+        final phone = FirebaseAuth.instance.currentUser?.phoneNumber ?? auth.userData?['phoneNumber'];
+        
+        if (phone == null) return;
+
+        final userDocRef = firestore.collection('users').doc(phone);
+
+        _userSubscription?.cancel();
+        _userSubscription = userDocRef.snapshots().listen((snapshot) {
+          if (mounted && snapshot.exists) {
+            final data = snapshot.data() as Map<String, dynamic>?;
+            if (data != null) {
+              setState(() {
+                _streak = (data['streak'] as num?)?.toInt() ?? 0;
+                _coins = (data['coins'] as num?)?.toInt() ?? 0;
+                _isPremium = (data['isPremium'] as bool?) ?? false;
+              });
+            }
+          }
+        });
+
+        final userDoc = await userDocRef.get();
+        final now = DateTime.now();
+        final today = DateTime(now.year, now.month, now.day);
+
+        int streak = 0;
+        int maxStreak = 0;
+        Timestamp? lastOnlineTimestamp;
+
+        if (userDoc.exists) {
+          final data = userDoc.data();
+          if (data != null) {
+            streak = (data['streak'] as num?)?.toInt() ?? 0;
+            maxStreak = (data['maxStreak'] as num?)?.toInt() ?? 0;
+            lastOnlineTimestamp = data['lastOnline'] as Timestamp?;
+          }
+        }
+
+        if (lastOnlineTimestamp != null) {
+          final lastOnlineDate = lastOnlineTimestamp.toDate();
+          final lastDate = DateTime(lastOnlineDate.year, lastOnlineDate.month, lastOnlineDate.day);
+          final difference = today.difference(lastDate).inDays;
+
+          if (difference == 1) {
+            streak += 1;
+            if (streak > maxStreak) maxStreak = streak;
+          } else if (difference > 1) {
+            streak = 1;
+            if (streak > maxStreak) maxStreak = streak;
+          } else if (difference == 0 && streak == 0) {
+            streak = 1;
+            if (streak > maxStreak) maxStreak = streak;
+          }
+        } else {
+          streak = 1;
+          maxStreak = 1;
+        }
+
+        await userDocRef.set({
+          'streak': streak,
+          'maxStreak': maxStreak,
+          'lastOnline': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true));
+
+        await auth.loadUserData(uid);
+
+      } catch (e) {
+        debugPrint("[SYSTEM PRESENCE WARNING] Update failed: $e");
+      }
+    }
+  }
+
   Widget _buildFallbackInitial(String name, Color textColor) {
     return Container(
       color: AppTheme.tealAccent,
@@ -178,9 +198,8 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget build(BuildContext context) {
     final auth = context.watch<AuthProvider>();
     
-    // Resolve stats from real-time stream state if hydrated; fallback to Provider state
     final currentStreak = _streak > 0 ? _streak.toString() : (auth.userData?['streak']?.toString() ?? '0');
-    final currentXp = _xp > 0 ? _xp.toString() : (auth.userData?['xp']?.toString() ?? '0');
+    final currentCoins = _coins > 0 ? _coins.toString() : (auth.userData?['coins']?.toString() ?? '0');
     final currentIsPremium = _isPremium || ((auth.userData?['isPremium'] as bool?) ?? false);
 
     final surfaceColor = AppTheme.getSurfaceColor(context);
@@ -188,7 +207,6 @@ class _HomeScreenState extends State<HomeScreen> {
     final textSecondary = AppTheme.getSecondaryTextColor(context);
     final isDark = Theme.of(context).brightness == Brightness.dark;
 
-    // Fetch details for bottom navigation local avatar integration
     final avatarUrl = auth.appUser?.avatarUrl;
     final userName = auth.appUser?.name ?? 'U';
 
@@ -211,7 +229,6 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
             child: Row(
               children: [
-                // Top-left Dynamic Brand Logo with clean message-circle fallback
                 ClipRRect(
                   borderRadius: BorderRadius.circular(12),
                   child: Image.asset(
@@ -254,9 +271,9 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
                 const SizedBox(width: 8),
                 _HeaderStatChip(
-                  icon: LucideIcons.zap,
-                  label: '$currentXp XP',
-                  color: AppTheme.tealAccent,
+                  icon: LucideIcons.coins,
+                  label: '$currentCoins Coins',
+                  color: Colors.amber,
                   surfaceColor: surfaceColor,
                   textColor: textPrimary,
                 ),

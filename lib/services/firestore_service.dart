@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_auth/firebase_auth.dart'; // Added to get the current user securely
+import 'package:cloud_functions/cloud_functions.dart'; // REQUIRED to trigger secure backend
 import '../models/models.dart';
 
 class FirestoreService {
@@ -117,7 +119,7 @@ class FirestoreService {
     int limit = 20, // Limit ranking list to top 20 as requested
   }) {
     return _users
-        .orderBy('xp', descending: true)
+        .orderBy('coins', descending: true)
         .limit(100)
         .snapshots()
         .map((snap) {
@@ -133,20 +135,20 @@ class FirestoreService {
         });
   }
 
-  Future<void> awardXp(String identifier, int amount) async {
+  Future<void> awardCoins(String identifier, int amount) async {
     final phone = await _resolvePhone(identifier);
-    await _users.doc(phone).update({
-      'xp': FieldValue.increment(amount),
+    await _users.doc(phone).set({
+      'coins': FieldValue.increment(amount),
       'updatedAt': FieldValue.serverTimestamp(),
-    });
+    }, SetOptions(merge: true));
   }
 
   Future<void> incrementConversations(String identifier) async {
     final phone = await _resolvePhone(identifier);
-    await _users.doc(phone).update({
+    await _users.doc(phone).set({
       'conversationsCount': FieldValue.increment(1),
       'updatedAt': FieldValue.serverTimestamp(),
-    });
+    }, SetOptions(merge: true));
   }
 
   Future<void> updateRating(String identifier, double newRating) async {
@@ -155,14 +157,16 @@ class FirestoreService {
     if (!doc.exists) return;
     final data = doc.data()!;
     final oldAvg = (data['avgRating'] as num?)?.toDouble() ?? 5.0;
-    final count = (data['conversationsCount'] as num?)?.toInt() ?? 0;
-    final updated = count > 0
-        ? ((oldAvg * count) + newRating) / (count + 1)
+    final ratingCount = (data['ratingsCount'] as num?)?.toInt() ?? 0;
+    final newCount = ratingCount + 1;
+    final updated = ratingCount > 0
+        ? ((oldAvg * ratingCount) + newRating) / newCount
         : newRating;
-    await _users.doc(phone).update({
+    await _users.doc(phone).set({
       'avgRating': double.parse(updated.toStringAsFixed(1)),
+      'ratingsCount': newCount,
       'updatedAt': FieldValue.serverTimestamp(),
-    });
+    }, SetOptions(merge: true));
   }
 
   Future<void> updateProfile(String identifier, Map<String, dynamic> fields) async {
@@ -197,54 +201,59 @@ class FirestoreService {
     return CallSession.fromDoc(await ref.get());
   }
 
-  Future<void> endCallSession(String callId, {int? durationMinutes}) async {
-    final ref = _calls.doc(callId);
-    final doc = await ref.get();
-    if (!doc.exists) return;
-
-    final data = doc.data()!;
-    final startedAt = (data['startedAt'] as Timestamp?)?.toDate();
-    int minutes = durationMinutes ?? 0;
-    if (minutes <= 0 && startedAt != null) {
-      minutes = DateTime.now().difference(startedAt).inMinutes.clamp(1, 999);
-    }
-    if (minutes <= 0) minutes = 1;
-
-    await ref.update({
-      'status': 'ended',
-      'endedAt': FieldValue.serverTimestamp(),
-      'durationMinutes': minutes,
-    });
-
-    final participants = List<String>.from(data['participantIds'] ?? []);
-    for (final uid in participants) {
-      final phone = await _resolvePhone(uid);
-      
-      // Update primary user stats
-      await _users.doc(phone).update({
-        'totalCalls': FieldValue.increment(1),
-        'minutesPracticed': FieldValue.increment(minutes),
-        'conversationsCount': FieldValue.increment(1),
-        'updatedAt': FieldValue.serverTimestamp(),
-      });
-
-      // Write to nested call_history subcollection
-      await _users.doc(phone).collection('call_history').doc(callId).set({
+  // DELEGATED TO CLOUD FUNCTIONS
+  Future<int> endCallSession(String callId, {int? durationMinutes, int? durationSeconds, required String dateStr}) async {
+    try {
+      final HttpsCallable callable = FirebaseFunctions.instanceFor(region: 'asia-south1').httpsCallable('endCallSession');
+      final result = await callable.call(<String, dynamic>{
         'callId': callId,
-        'participantIds': participants,
-        'participantNames': data['participantNames'],
-        'participantAvatars': data['participantAvatars'],
-        'status': 'ended',
-        'startedAt': data['startedAt'],
-        'endedAt': FieldValue.serverTimestamp(),
-        'durationMinutes': minutes,
+        'durationSeconds': durationSeconds ?? 0,
+        'dateStr': dateStr,
       });
+      return (result.data['coinsEarned'] as num?)?.toInt() ?? 0;
+    } catch (e) {
+      print("[TalkTandem FirestoreService] Error in cloud function endCallSession: $e");
+      return 0;
+    }
+  }
+
+  Future<bool> endAiCallSession({required int durationSeconds, required int coinsEarned, required String dateStr}) async {
+    try {
+      final HttpsCallable callable = FirebaseFunctions.instanceFor(region: 'asia-south1').httpsCallable('endAiCallSession');
+      final result = await callable.call(<String, dynamic>{
+        'durationSeconds': durationSeconds,
+        'coinsEarned': coinsEarned,
+        'dateStr': dateStr,
+      });
+      return (result.data['success'] as bool?) ?? false;
+    } catch (e) {
+      print("[TalkTandem FirestoreService] Error in cloud function endAiCallSession: $e");
+      return false;
     }
   }
 
   Stream<List<CallSession>> watchCallHistory(String myUid) {
     // Return call history stream from the nested subcollection
     return StreamBuilderHelper.watchSubcollectionCallHistory(_users, myUid);
+  }
+
+  Stream<Map<String, int>> watchPracticeHistory(String identifier) {
+    final StreamController<Map<String, int>> controller = StreamController<Map<String, int>>.broadcast();
+    _resolvePhone(identifier).then((phone) {
+      _users.doc(phone).collection('practice_history').snapshots().map((snapshot) {
+        final Map<String, int> history = {};
+        for (var doc in snapshot.docs) {
+          final data = doc.data();
+          final dateStr = doc.id;
+          final minutes = (data['minutes'] as num?)?.toInt() ?? 0;
+          history[dateStr] = minutes;
+        }
+        return history;
+      }).listen(controller.add, onError: controller.addError);
+    }).catchError((e) {
+      controller.addError(e);
+    });
+    return controller.stream;
   }
 
   // --- Friends Subcollections Lifecycle ---
@@ -260,8 +269,12 @@ class FirestoreService {
     required String myUid,
     required String otherUid,
   }) async {
+    if (myUid.isEmpty || otherUid.isEmpty) return null;
+
     final myPhone = await _resolvePhone(myUid);
     final otherPhone = await _resolvePhone(otherUid);
+
+    if (myPhone.isEmpty || otherPhone.isEmpty) return null;
 
     // Look up directly in subcollection
     final doc = await _users.doc(myPhone).collection('friend_requests').doc(otherPhone).get();
@@ -311,23 +324,23 @@ class FirestoreService {
     final fromPhone = await _resolvePhone(fromUid);
     final toPhone = await _resolvePhone(toUid);
 
-    // Update statuses in BOTH subcollections
-    await _users.doc(toPhone).collection('friend_requests').doc(fromPhone).update({
-      'status': accept ? 'accepted' : 'declined',
-      'updatedAt': FieldValue.serverTimestamp(),
-    });
-    await _users.doc(fromPhone).collection('friend_requests').doc(toPhone).update({
-      'status': accept ? 'accepted' : 'declined',
-      'updatedAt': FieldValue.serverTimestamp(),
-    });
-
     if (accept) {
-      // 1. Update friend arrays on base user profiles
+      // Update statuses in BOTH subcollections to accepted
+      await _users.doc(toPhone).collection('friend_requests').doc(fromPhone).update({
+        'status': 'accepted',
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+      await _users.doc(fromPhone).collection('friend_requests').doc(toPhone).update({
+        'status': 'accepted',
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+
+      // 1. Update friend arrays on base user profiles (store actual UIDs so contains() checks succeed)
       await _users.doc(fromPhone).update({
-        'friendIds': FieldValue.arrayUnion([toPhone]),
+        'friendIds': FieldValue.arrayUnion([toUid]),
       });
       await _users.doc(toPhone).update({
-        'friendIds': FieldValue.arrayUnion([fromPhone]),
+        'friendIds': FieldValue.arrayUnion([fromUid]),
       });
 
       // 2. Fetch profiles to write friends subcollection documents
@@ -354,15 +367,51 @@ class FirestoreService {
         'addedAt': FieldValue.serverTimestamp(),
       });
 
-      // 4. Auto-generate Lounge conversation immediately so they show up in Lounge chats list
-      final userA = AppUser.fromMap(fromPhone, dataA);
-      final userB = AppUser.fromMap(toPhone, dataB);
-      await getOrCreateConversation(
-        myUid: fromUid,
-        me: userA,
-        partner: userB,
-      );
+      // 4. Force/create Lounge conversation immediately, set isRequest: false so it appears in Chats tab,
+      // and update lastMessageAt to serverTimestamp so it jumps to the top (first chat) of the list.
+      final convId = conversationIdFor(fromUid, toUid);
+      await _conversations.doc(convId).set({
+        'participantIds': [fromUid, toUid],
+        'participantNames': {fromUid: dataA['name'] ?? 'User', toUid: dataB['name'] ?? 'User'},
+        'participantAvatars': {
+          fromUid: dataA['avatarUrl'],
+          toUid: dataB['avatarUrl'],
+        },
+        'lastMessage': '',
+        'lastMessageAt': FieldValue.serverTimestamp(),
+        'unreadCount': {fromUid: 0, toUid: 0},
+        'createdAt': FieldValue.serverTimestamp(),
+        'isRequest': false,
+      }, SetOptions(merge: true));
+    } else {
+      // Clean request from both subcollections
+      await _users.doc(toPhone).collection('friend_requests').doc(fromPhone).delete();
+      await _users.doc(fromPhone).collection('friend_requests').doc(toPhone).delete();
     }
+  }
+
+  Future<void> unfriend({
+    required String myUid,
+    required String otherUid,
+  }) async {
+    final myPhone = await _resolvePhone(myUid);
+    final otherPhone = await _resolvePhone(otherUid);
+
+    // 1. Remove friendIds from base user profile documents
+    await _users.doc(myPhone).update({
+      'friendIds': FieldValue.arrayRemove([otherUid]),
+    });
+    await _users.doc(otherPhone).update({
+      'friendIds': FieldValue.arrayRemove([myUid]),
+    });
+
+    // 2. Delete the friend document under both users' friends subcollection
+    await _users.doc(myPhone).collection('friends').doc(otherPhone).delete();
+    await _users.doc(otherPhone).collection('friends').doc(myPhone).delete();
+
+    // 3. Delete friend request status so they can request again if needed
+    await _users.doc(myPhone).collection('friend_requests').doc(otherPhone).delete();
+    await _users.doc(otherPhone).collection('friend_requests').doc(myPhone).delete();
   }
 
   Stream<List<FriendRequest>> watchIncomingFriendRequests(String myUid) {
@@ -405,20 +454,81 @@ class FirestoreService {
     return convId;
   }
 
+  Future<String> getOrCreateConversationAsRequest({
+    required String myUid,
+    required AppUser me,
+    required AppUser partner,
+  }) async {
+    final convId = conversationIdFor(myUid, partner.uid);
+    final ref = _conversations.doc(convId);
+    final existing = await ref.get();
+    if (!existing.exists) {
+      await ref.set({
+        'participantIds': [myUid, partner.uid],
+        'participantNames': {myUid: me.name, partner.uid: partner.name},
+        'participantAvatars': {
+          myUid: me.avatarUrl,
+          partner.uid: partner.avatarUrl,
+        },
+        'lastMessage': '',
+        'lastMessageAt': FieldValue.serverTimestamp(),
+        'unreadCount': {myUid: 0, partner.uid: 0},
+        'createdAt': FieldValue.serverTimestamp(),
+        'isRequest': true,
+        'requestSenderId': myUid,
+      });
+    } else if (existing.data()?['isRequest'] == false) {
+      // If it exists and is active, do nothing
+    } else {
+      // If it exists but is a request, ensure request properties are set
+      await ref.update({
+        'isRequest': true,
+        'requestSenderId': myUid,
+      });
+    }
+    return convId;
+  }
+
+  Future<void> acceptChatRequest(String conversationId) async {
+    await _conversations.doc(conversationId).update({
+      'isRequest': false,
+    });
+  }
+
+  Future<void> declineChatRequest(String conversationId) async {
+    await _conversations.doc(conversationId).delete();
+  }
+
   Stream<List<Conversation>> watchConversations(String myUid) {
     return _conversations
         .where('participantIds', arrayContains: myUid)
         .snapshots()
         .map((snap) {
           final list = snap.docs.map(Conversation.fromDoc).toList();
-          list.sort((a, b) {
+          final filtered = list.where((conv) {
+            if (conv.isRequest && conv.requestSenderId != myUid) {
+              return false; // Hide requests from recipient's primary tab
+            }
+            return true;
+          }).toList();
+          filtered.sort((a, b) {
             final at = a.lastMessageAt ??
                 DateTime.fromMillisecondsSinceEpoch(0);
             final bt = b.lastMessageAt ??
                 DateTime.fromMillisecondsSinceEpoch(0);
             return bt.compareTo(at);
           });
-          return list;
+          return filtered;
+        });
+  }
+
+  Stream<List<Conversation>> watchIncomingChatRequests(String myUid) {
+    return _conversations
+        .where('participantIds', arrayContains: myUid)
+        .snapshots()
+        .map((snap) {
+          final list = snap.docs.map(Conversation.fromDoc).toList();
+          return list.where((conv) => conv.isRequest && conv.requestSenderId != myUid).toList();
         });
   }
 
@@ -502,27 +612,26 @@ class FirestoreService {
 
   // --- Feedback & Reports ---
 
+  // DELEGATED TO CLOUD FUNCTIONS
   Future<void> submitCallFeedback({
     required String callId,
     required String raterId,
     required String ratedUserId,
-    required int politenessRating,
-    required int clarityRating,
+    required int rating,
     required List<String> tags,
   }) async {
-    await _feedback.add({
-      'callId': callId,
-      'raterId': raterId,
-      'ratedUserId': ratedUserId,
-      'politenessRating': politenessRating,
-      'clarityRating': clarityRating,
-      'tags': tags,
-      'createdAt': FieldValue.serverTimestamp(),
-    });
-
-    final avg = (politenessRating + clarityRating) / 2.0;
-    await updateRating(ratedUserId, avg);
-    await awardXp(raterId, 25);
+    try {
+      final HttpsCallable callable = FirebaseFunctions.instanceFor(region: 'asia-south1').httpsCallable('submitCallFeedback');
+      await callable.call(<String, dynamic>{
+        'callId': callId,
+        'ratedUserId': ratedUserId,
+        'rating': rating,
+        'tags': tags,
+      });
+    } catch (e) {
+      print("[TalkTandem FirestoreService] Error in cloud function submitCallFeedback: $e");
+      rethrow;
+    }
   }
 
   Future<void> submitReport({

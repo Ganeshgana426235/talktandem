@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:lucide_icons/lucide_icons.dart';
 import 'package:provider/provider.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_core/firebase_core.dart';
 import '../../models/auth_provider.dart';
 import '../../models/models.dart';
 import '../../theme/app_theme.dart';
@@ -234,10 +236,77 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
     );
   }
 
+  void _showUnfriendConfirmDialog() {
+    final surface = AppTheme.getSurfaceColor(context);
+    final textPrimary = AppTheme.getTextColor(context);
+    final textSecondary = AppTheme.getSecondaryTextColor(context);
+
+    showDialog(
+      context: context,
+      builder: (ctx) {
+        return AlertDialog(
+          backgroundColor: surface,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+          title: Text(
+            'Unfriend ${widget.friendName}',
+            style: TextStyle(color: textPrimary, fontWeight: FontWeight.bold),
+          ),
+          content: Text(
+            'Are you sure you want to remove ${widget.friendName} from your friends list? You will no longer be able to message each other.',
+            style: TextStyle(color: textSecondary),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel', style: TextStyle(color: Colors.grey, fontWeight: FontWeight.bold)),
+            ),
+            ElevatedButton(
+              onPressed: () async {
+                Navigator.pop(ctx);
+                final auth = context.read<AuthProvider>();
+                final myUid = auth.uid;
+                if (myUid != null) {
+                  try {
+                    await auth.firestore.unfriend(
+                      myUid: myUid,
+                      otherUid: widget.friendId,
+                    );
+                    await auth.loadUserData(myUid);
+                    
+                    if (!mounted) return;
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text('Removed ${widget.friendName} from friends.')),
+                    );
+                    Navigator.of(context).pop(); // Go back to the chat list
+                  } catch (e) {
+                    if (!mounted) return;
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text('Failed to unfriend: $e')),
+                    );
+                  }
+                }
+              },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: AppTheme.coralAction,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+              ),
+              child: const Text(
+                'Unfriend',
+                style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final auth = context.watch<AuthProvider>();
     final myUid = auth.uid ?? '';
+    final friendIds = List<String>.from(auth.userData?['friendIds'] ?? []);
+    final isFriend = friendIds.contains(widget.friendId);
     final textPrimary = AppTheme.getTextColor(context);
     final textSecondary = AppTheme.getSecondaryTextColor(context);
     final surfaceColor = AppTheme.getSurfaceColor(context);
@@ -251,10 +320,40 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
         elevation: 1,
         iconTheme: IconThemeData(color: textPrimary),
         actions: [
-          IconButton(
-            icon: const Icon(LucideIcons.flag, color: AppTheme.errorRed),
-            onPressed: _showReportSheet,
-            tooltip: 'Report / Block',
+          PopupMenuButton<String>(
+            icon: Icon(LucideIcons.moreVertical, color: textPrimary),
+            onSelected: (value) {
+              if (value == 'unfriend') {
+                _showUnfriendConfirmDialog();
+              } else if (value == 'report') {
+                _showReportSheet();
+              }
+            },
+            itemBuilder: (context) {
+              return [
+                if (isFriend)
+                  const PopupMenuItem<String>(
+                    value: 'unfriend',
+                    child: Row(
+                      children: [
+                        Icon(LucideIcons.userMinus, color: Colors.orange, size: 18),
+                        SizedBox(width: 8),
+                        Text('Unfriend', style: TextStyle(color: Colors.orange)),
+                      ],
+                    ),
+                  ),
+                const PopupMenuItem<String>(
+                  value: 'report',
+                  child: Row(
+                    children: [
+                      Icon(LucideIcons.flag, color: AppTheme.errorRed, size: 18),
+                      SizedBox(width: 8),
+                      Text('Report / Block', style: TextStyle(color: AppTheme.errorRed)),
+                    ],
+                  ),
+                ),
+              ];
+            },
           ),
         ],
       ),
@@ -382,44 +481,127 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
               },
             ),
           ),
-          Container(
-            padding: const EdgeInsets.all(16),
-            color: surfaceColor,
-            child: SafeArea(
-              child: Row(
-                children: [
-                  Expanded(
-                    child: TextField(
-                      controller: _messageController,
-                      style: TextStyle(color: textPrimary),
-                      decoration: InputDecoration(
-                        hintText: 'Type a message...',
-                        hintStyle: TextStyle(
-                            color: textSecondary.withValues(alpha: 0.6)),
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(24),
-                          borderSide: BorderSide.none,
+          StreamBuilder<DocumentSnapshot>(
+            stream: FirebaseFirestore.instanceFor(
+              app: Firebase.app(),
+              databaseId: 'talktandem',
+            ).collection('conversations').doc(widget.conversationId).snapshots(),
+            builder: (context, snapshot) {
+              bool isPendingRequest = false;
+              if (snapshot.hasData && snapshot.data!.exists) {
+                final data = snapshot.data!.data() as Map<String, dynamic>?;
+                if (data != null) {
+                  final isRequest = data['isRequest'] as bool? ?? false;
+                  final senderId = data['requestSenderId'] as String?;
+                  if (isRequest && senderId != myUid) {
+                    isPendingRequest = true;
+                  }
+                }
+              }
+
+              if (isPendingRequest) {
+                final borderColor = AppTheme.getBorderColor(context);
+                return Container(
+                  padding: const EdgeInsets.all(18),
+                  decoration: BoxDecoration(
+                    color: surfaceColor,
+                    border: Border(top: BorderSide(color: borderColor)),
+                  ),
+                  child: SafeArea(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          'Message Request',
+                          style: TextStyle(color: textPrimary, fontWeight: FontWeight.bold, fontSize: 16),
                         ),
-                        filled: true,
-                        fillColor: scaffoldBg,
-                        contentPadding: const EdgeInsets.symmetric(
-                            horizontal: 20, vertical: 10),
+                        const SizedBox(height: 6),
+                        Text(
+                          '${widget.friendName} wants to message you directly. Accept their request to start chatting.',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(color: textSecondary, fontSize: 13),
+                        ),
+                        const SizedBox(height: 18),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: OutlinedButton(
+                                onPressed: () async {
+                                  await auth.firestore.declineChatRequest(widget.conversationId);
+                                  if (context.mounted) {
+                                    Navigator.pop(context);
+                                  }
+                                },
+                                style: OutlinedButton.styleFrom(
+                                  side: const BorderSide(color: AppTheme.errorRed),
+                                  padding: const EdgeInsets.symmetric(vertical: 14),
+                                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                                ),
+                                child: const Text('Decline', style: TextStyle(color: AppTheme.errorRed, fontWeight: FontWeight.bold)),
+                              ),
+                            ),
+                            const SizedBox(width: 16),
+                            Expanded(
+                              child: ElevatedButton(
+                                onPressed: () async {
+                                  await auth.firestore.acceptChatRequest(widget.conversationId);
+                                },
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: AppTheme.tealAccent,
+                                  padding: const EdgeInsets.symmetric(vertical: 14),
+                                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                                ),
+                                child: const Text('Accept', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              }
+
+              return Container(
+                padding: const EdgeInsets.all(16),
+                color: surfaceColor,
+                child: SafeArea(
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          controller: _messageController,
+                          style: TextStyle(color: textPrimary),
+                          decoration: InputDecoration(
+                            hintText: 'Type a message...',
+                            hintStyle: TextStyle(
+                                color: textSecondary.withValues(alpha: 0.6)),
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(24),
+                              borderSide: BorderSide.none,
+                            ),
+                            filled: true,
+                            fillColor: scaffoldBg,
+                            contentPadding: const EdgeInsets.symmetric(
+                                horizontal: 20, vertical: 10),
+                          ),
+                          onSubmitted: (_) => _sendMessage(),
+                        ),
                       ),
-                      onSubmitted: (_) => _sendMessage(),
-                    ),
+                      const SizedBox(width: 8),
+                      CircleAvatar(
+                        backgroundColor: AppTheme.tealAccent,
+                        child: IconButton(
+                          icon: const Icon(Icons.send,
+                              color: Colors.white, size: 20),
+                          onPressed: _sendMessage,
+                        ),
+                      ),
+                    ],
                   ),
-                  const SizedBox(width: 8),
-                  CircleAvatar(
-                    backgroundColor: AppTheme.tealAccent,
-                    child: IconButton(
-                      icon: const Icon(Icons.send,
-                          color: Colors.white, size: 20),
-                      onPressed: _sendMessage,
-                    ),
-                  ),
-                ],
-              ),
-            ),
+                ),
+              );
+            },
           ),
         ],
       ),

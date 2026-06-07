@@ -196,7 +196,7 @@ class _MatchingScreenState extends State<MatchingScreen> with SingleTickerProvid
     }
 
     // Daily Limit Check Before Searching
-    final today = "${DateTime.now().year}-${DateTime.now().month}-${DateTime.now().day}";
+    final today = "${DateTime.now().year}-${DateTime.now().month.toString().padLeft(2, '0')}-${DateTime.now().day.toString().padLeft(2, '0')}";
     final lastCallDate = auth.userData?['lastCallDate'] as String?;
     final isPremium = (auth.userData?['isPremium'] as bool?) ?? false;
     
@@ -205,13 +205,54 @@ class _MatchingScreenState extends State<MatchingScreen> with SingleTickerProvid
       dailyTalkSeconds = (auth.userData?['dailyTalkSeconds'] as num?)?.toInt() ?? 0;
     }
 
-    if (!isPremium && dailyTalkSeconds >= 90 * 60) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Daily free limit of 90 minutes reached. Connect with friends directly or wait until tomorrow!'),
-          backgroundColor: AppTheme.coralAction,
-          duration: Duration(seconds: 5),
-        ),
+    if (!isPremium && dailyTalkSeconds >= 60 * 60) {
+      showDialog(
+        context: context,
+        builder: (ctx) {
+          final surface = AppTheme.getSurfaceColor(ctx);
+          final textPrimary = AppTheme.getTextColor(ctx);
+          final textSecondary = AppTheme.getSecondaryTextColor(ctx);
+          return AlertDialog(
+            backgroundColor: surface,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+            title: Row(
+              children: [
+                const Icon(LucideIcons.crown, color: AppTheme.amberPremium, size: 28),
+                const SizedBox(width: 10),
+                Text(
+                  'Daily Limit Reached',
+                  style: TextStyle(color: textPrimary, fontWeight: FontWeight.bold),
+                ),
+              ],
+            ),
+            content: Text(
+              'Your daily free practice limit of 60 minutes has been completed. Upgrade to premium for unlimited calls, or wait until tomorrow!',
+              style: TextStyle(color: textSecondary),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Wait Till Tomorrow', style: TextStyle(color: Colors.grey, fontWeight: FontWeight.bold)),
+              ),
+              ElevatedButton(
+                onPressed: () {
+                  Navigator.pop(ctx);
+                  showModalBottomSheet(
+                    context: context,
+                    isScrollControlled: true,
+                    backgroundColor: Colors.transparent,
+                    builder: (context) => const PremiumBottomSheet(),
+                  );
+                },
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: AppTheme.amberPremium,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                ),
+                child: const Text('Buy Premium', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+              ),
+            ],
+          );
+        },
       );
       return;
     }

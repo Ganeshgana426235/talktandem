@@ -9,12 +9,15 @@ import 'package:lucide_icons/lucide_icons.dart';
 import '../../models/auth_provider.dart';
 import '../../models/models.dart';
 import '../../theme/app_theme.dart';
+import '../../widgets/coins_earning_overlay.dart';
+import '../../widgets/premium_bottom_sheet.dart';
 
 class PostCallFeedbackScreen extends StatefulWidget {
   final String callId;
   final AppUser partner;
   final int durationSeconds;
   final String? disconnectReason;
+  final int coinsEarned;
 
   const PostCallFeedbackScreen({
     super.key,
@@ -22,6 +25,7 @@ class PostCallFeedbackScreen extends StatefulWidget {
     required this.partner,
     this.durationSeconds = 0,
     this.disconnectReason,
+    this.coinsEarned = 0,
   });
 
   @override
@@ -29,11 +33,14 @@ class PostCallFeedbackScreen extends StatefulWidget {
 }
 
 class _PostCallFeedbackScreenState extends State<PostCallFeedbackScreen> {
-  int _politenessRating = 0;
-  int _clarityRating = 0;
+  int _sessionRating = 0;
   bool _isSubmitting = false;
   bool _isSendingFriendRequest = false;
   bool _friendRequestSent = false;
+  bool _isAlreadyFriend = false;
+  int _initialCoins = 0;
+  bool _showCoinsOverlay = false; // Hidden until Cloud Function processes
+  int _coinsEarned = 0;
   
   // Call Stats and Ads
   int _callsToday = 0;
@@ -54,8 +61,29 @@ class _PostCallFeedbackScreenState extends State<PostCallFeedbackScreen> {
   @override
   void initState() {
     super.initState();
+    final auth = context.read<AuthProvider>();
+    
+    // Safely grab initial coins
+    _initialCoins = (auth.userData?['coins'] as num?)?.toInt() ?? 0;
+    
+    debugPrint("\n=========================================");
+    debugPrint("[COIN_DEBUG] STEP 4: Feedback Screen Init. Passed earned coins: ${widget.coinsEarned}");
+    debugPrint("[COIN_DEBUG] STEP 5: Loaded Initial Coins from Auth State: $_initialCoins");
+    debugPrint("=========================================\n");
+
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       _showLimitNotices();
+      
+      final friendIds = List<String>.from(auth.userData?['friendIds'] ?? []);
+      final partnerId = widget.partner.phoneNumber ?? widget.partner.uid;
+      
+      if (friendIds.contains(partnerId)) {
+        setState(() {
+          _isAlreadyFriend = true;
+          _friendRequestSent = true;
+        });
+      }
+
       await _processDailyLimitsAndAds();
     });
   }
@@ -69,10 +97,16 @@ class _PostCallFeedbackScreenState extends State<PostCallFeedbackScreen> {
       ));
     } else if (widget.disconnectReason == 'limit_daily') {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text('Your 90-minute daily free limit has been reached. Upgrade to premium for unlimited calls!'),
+        content: Text('Your 60-minute daily free limit has been reached. Upgrade to premium for unlimited calls!'),
         duration: Duration(seconds: 4),
         backgroundColor: AppTheme.coralAction,
       ));
+      showModalBottomSheet(
+        context: context,
+        isScrollControlled: true,
+        backgroundColor: Colors.transparent,
+        builder: (context) => const PremiumBottomSheet(),
+      );
     }
   }
 
@@ -82,43 +116,78 @@ class _PostCallFeedbackScreenState extends State<PostCallFeedbackScreen> {
     if (myPhone == null) return;
 
     final firestore = FirebaseFirestore.instanceFor(app: Firebase.app(), databaseId: 'talktandem');
-    final today = "${DateTime.now().year}-${DateTime.now().month}-${DateTime.now().day}";
-    final userRef = firestore.collection('users').doc(myPhone);
 
     try {
-      // 1. Transactionally Update Limits
-      await firestore.runTransaction((transaction) async {
-        final snapshot = await transaction.get(userRef);
-        int dailySecs = 0;
-        int callsToday = 0;
-        
-        if (snapshot.data()?['lastCallDate'] == today) {
-          dailySecs = (snapshot.data()?['dailyTalkSeconds'] as num?)?.toInt() ?? 0;
-          callsToday = (snapshot.data()?['dailyCallsCount'] as num?)?.toInt() ?? 0;
-        }
-        
-        dailySecs += widget.durationSeconds;
-        callsToday += 1;
-        
-        transaction.update(userRef, {
-          'dailyTalkSeconds': dailySecs,
-          'dailyCallsCount': callsToday,
-          'lastCallDate': today,
-        });
-        
-        _callsToday = callsToday;
-      });
+      final now = DateTime.now();
+      final todayStr = "${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}";
+      final minutes = (widget.durationSeconds / 60).ceil().clamp(1, 999);
 
-      // 2. Pre-Load Correct Ad
-      if (_callsToday % 10 == 0) {
-        _loadRewardedAd();
-      } else if (_callsToday % 3 == 0) {
-        _loadInterstitialAd();
+      // 1. Process ending the call session via secure Cloud Function
+      print("[TalkTandem PostCallFeedback] Calling endCallSession Cloud Function...");
+      
+      final fetchedCoins = await auth.firestore.endCallSession(
+        widget.callId,
+        durationMinutes: minutes,
+        durationSeconds: widget.durationSeconds,
+        dateStr: todayStr,
+      );
+
+      // 2. Reload user data to get updated stats pushed by the server
+      await auth.loadUserData(auth.uid ?? '');
+
+      // 2.5. Update call history logs locally in Firestore (if the call lasted > 5 seconds)
+      if (widget.durationSeconds > 5) {
+        try {
+          // Write to nested call_history subcollection (Personal History) - allowed by rules
+          final partnerPhone = widget.partner.phoneNumber ?? widget.partner.uid;
+          final callHistoryData = {
+            'callId': widget.callId,
+            'participantIds': [myPhone, partnerPhone],
+            'participantNames': {
+              myPhone: auth.userData?['name'] ?? 'User',
+              partnerPhone: widget.partner.name,
+            },
+            'participantAvatars': {
+              myPhone: auth.userData?['avatarUrl'],
+              partnerPhone: widget.partner.avatarUrl,
+            },
+            'status': 'ended',
+            'startedAt': Timestamp.fromDate(now.subtract(Duration(seconds: widget.durationSeconds))),
+            'endedAt': FieldValue.serverTimestamp(),
+            'durationMinutes': minutes,
+          };
+          await firestore.collection('users').doc(myPhone).collection('call_history').doc(widget.callId).set(callHistoryData);
+
+          // Reload user data to synchronize local Provider state
+          await auth.loadUserData(auth.uid ?? '');
+        } catch (statsError) {
+          debugPrint("[TalkTandem Call Stats] Warning: failed to write user stats to Firestore: $statsError");
+        }
+      }
+      
+      if (mounted) {
+        setState(() {
+          _coinsEarned = fetchedCoins;
+          if (_coinsEarned > 0) {
+            _showCoinsOverlay = true;
+          }
+        });
+      }
+
+      // Get the updated daily calls count from reloaded data
+      _callsToday = (auth.userData?['dailyCallsCount'] as num?)?.toInt() ?? 0;
+
+      // 3. Pre-Load Correct Ad
+      final isPremium = (auth.userData?['isPremium'] as bool?) ?? false;
+      if (!isPremium) {
+        if (_callsToday % 10 == 0) {
+          _loadRewardedAd();
+        } else if (_callsToday % 3 == 0) {
+          _loadInterstitialAd();
+        }
       }
       
       // Cleanup WebRTC logic silently in background
-      await auth.firestore.endCallSession(widget.callId, durationMinutes: (widget.durationSeconds / 60).ceil());
-      await auth.loadUserData(auth.uid ?? '');
       await _cleanupWebRTC(firestore);
       
     } catch (e) {
@@ -161,6 +230,12 @@ class _PostCallFeedbackScreenState extends State<PostCallFeedbackScreen> {
   }
 
   void _processExitAction() {
+    final auth = context.read<AuthProvider>();
+    final isPremium = (auth.userData?['isPremium'] as bool?) ?? false;
+    if (isPremium) {
+      _navigateHome();
+      return;
+    }
     if (_rewardedAd != null) {
       _rewardedAd!.show(onUserEarnedReward: (ad, reward) {
         debugPrint("User earned reward");
@@ -201,6 +276,8 @@ class _PostCallFeedbackScreenState extends State<PostCallFeedbackScreen> {
   }
 
   Future<void> _sendFriendRequest() async {
+    if (_isAlreadyFriend) return; // Guard logic
+    
     final auth = context.read<AuthProvider>();
     final uid = auth.uid;
     final me = auth.appUser;
@@ -209,25 +286,13 @@ class _PostCallFeedbackScreenState extends State<PostCallFeedbackScreen> {
     setState(() => _isSendingFriendRequest = true);
 
     try {
-      final firestore = FirebaseFirestore.instanceFor(
-        app: Firebase.app(),
-        databaseId: 'talktandem',
+      await auth.firestore.sendFriendRequest(
+        fromUid: uid,
+        me: me,
+        toUid: widget.partner.uid,
+        toName: widget.partner.name,
+        toAvatar: widget.partner.avatarUrl,
       );
-
-      final partnerPhone = widget.partner.phoneNumber ?? widget.partner.uid;
-
-      await firestore
-          .collection('users')
-          .doc(partnerPhone)
-          .collection('friend_requests')
-          .doc(uid)
-          .set({
-        'senderId': uid,
-        'senderName': me.name,
-        'senderAvatarUrl': me.avatarUrl,
-        'status': 'pending',
-        'createdAt': FieldValue.serverTimestamp(),
-      });
 
       setState(() {
         _friendRequestSent = true;
@@ -356,9 +421,9 @@ class _PostCallFeedbackScreenState extends State<PostCallFeedbackScreen> {
   }
 
   Future<void> _submitFeedback() async {
-    if (_politenessRating == 0 || _clarityRating == 0) {
+    if (_sessionRating == 0) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please rate both categories before submitting.')),
+        const SnackBar(content: Text('Please select a rating before submitting.')),
       );
       return;
     }
@@ -370,29 +435,16 @@ class _PostCallFeedbackScreenState extends State<PostCallFeedbackScreen> {
     setState(() => _isSubmitting = true);
 
     try {
-      final firestore = FirebaseFirestore.instanceFor(
-        app: Firebase.app(),
-        databaseId: 'talktandem',
-      );
-
       final partnerPhone = widget.partner.phoneNumber ?? widget.partner.uid;
 
-      await firestore.collection('feedback').add({
-        'callId': widget.callId,
-        'raterId': uid,
-        'ratedUserId': partnerPhone,
-        'politenessRating': _politenessRating,
-        'clarityRating': _clarityRating,
-        'tags': _selectedTags.toList(),
-        'createdAt': FieldValue.serverTimestamp(),
-      });
-
-      final myPhone = auth.userData?['phoneNumber'] ?? FirebaseAuth.instance.currentUser?.phoneNumber;
-      if (myPhone != null) {
-        await firestore.collection('users').doc(myPhone).update({
-          'xp': FieldValue.increment(25),
-        });
-      }
+      // Centralized submission (Cloud function awards +25 coins safely)
+      await auth.firestore.submitCallFeedback(
+        callId: widget.callId,
+        raterId: uid,
+        ratedUserId: partnerPhone,
+        rating: _sessionRating,
+        tags: _selectedTags.toList(),
+      );
 
       final me = auth.appUser;
       if (me != null) {
@@ -406,7 +458,7 @@ class _PostCallFeedbackScreenState extends State<PostCallFeedbackScreen> {
       await auth.loadUserData(uid);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Thanks! +25 XP earned for your feedback.')),
+          const SnackBar(content: Text('Thanks! +25 Coins earned for your feedback.')),
         );
       }
       
@@ -437,7 +489,9 @@ class _PostCallFeedbackScreenState extends State<PostCallFeedbackScreen> {
     final borderColor = AppTheme.getBorderColor(context);
     final isDark = Theme.of(context).brightness == Brightness.dark;
 
-    return Scaffold(
+    return Stack(
+      children: [
+        Scaffold(
       appBar: AppBar(
         title: Text('Evaluation',
             style: TextStyle(color: textPrimary, fontWeight: FontWeight.bold)),
@@ -499,12 +553,12 @@ class _PostCallFeedbackScreenState extends State<PostCallFeedbackScreen> {
                 ElevatedButton.icon(
                   onPressed: (_isSendingFriendRequest || _friendRequestSent) ? null : _sendFriendRequest,
                   icon: Icon(
-                    _friendRequestSent ? Icons.check_circle_outline : LucideIcons.userPlus,
+                    _isAlreadyFriend ? LucideIcons.userCheck : (_friendRequestSent ? Icons.check_circle_outline : LucideIcons.userPlus),
                     size: 16,
                   ),
-                  label: Text(_friendRequestSent ? 'Sent' : 'Add Friend'),
+                  label: Text(_isAlreadyFriend ? 'Friends' : (_friendRequestSent ? 'Sent' : 'Add Friend')),
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: _friendRequestSent ? Colors.grey : AppTheme.tealAccent,
+                    backgroundColor: (_friendRequestSent || _isAlreadyFriend) ? Colors.grey : AppTheme.tealAccent,
                     foregroundColor: Colors.white,
                     disabledBackgroundColor: Colors.teal.withOpacity(0.12),
                     disabledForegroundColor: AppTheme.tealAccent.withOpacity(0.5),
@@ -529,14 +583,8 @@ class _PostCallFeedbackScreenState extends State<PostCallFeedbackScreen> {
                 ),
               ],
             ),
-            const SizedBox(height: 32),
-            
-            _buildRatingRow('Partner Politeness', _politenessRating, (rating) {
-              setState(() => _politenessRating = rating);
-            }),
-            const SizedBox(height: 24),
-            _buildRatingRow('Speaking Clarity', _clarityRating, (rating) {
-              setState(() => _clarityRating = rating);
+            _buildRatingRow('Session Rating', _sessionRating, (rating) {
+              setState(() => _sessionRating = rating);
             }),
             const SizedBox(height: 32),
             Align(
@@ -608,11 +656,23 @@ class _PostCallFeedbackScreenState extends State<PostCallFeedbackScreen> {
                           fontWeight: FontWeight.bold,
                         ),
                       ),
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
+      if (_showCoinsOverlay)
+          CoinsEarningOverlay(
+            coinsEarned: _coinsEarned,
+            initialCoins: _initialCoins,
+            onDismiss: () {
+              setState(() {
+                _showCoinsOverlay = false;
+              });
+            },
+          ),
+      ],
     );
   }
 

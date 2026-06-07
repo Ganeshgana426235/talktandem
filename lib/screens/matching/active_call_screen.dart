@@ -63,7 +63,7 @@ class _ActiveCallScreenState extends State<ActiveCallScreen> with SingleTickerPr
     "What is your dream travel destination and what would you do first when you arrive?",
     "If you could have dinner with any historical figure, who would it be and why?",
     "Describe your absolute ideal weekend morning from start to finish.",
-    "What's the best book, movie, or series you've finished recently and why?",
+    "What's the best book, movie, or series you finished recently and why?",
     "If you could instantly master any professional skill, what would it be?",
     "Tell a story about a funny or unexpected thing that happened to you this week.",
   ];
@@ -146,7 +146,7 @@ class _ActiveCallScreenState extends State<ActiveCallScreen> with SingleTickerPr
     
     // Fetch initial limits mapping for limits tracker
     final auth = context.read<AuthProvider>();
-    final today = "${DateTime.now().year}-${DateTime.now().month}-${DateTime.now().day}";
+    final today = "${DateTime.now().year}-${DateTime.now().month.toString().padLeft(2, '0')}-${DateTime.now().day.toString().padLeft(2, '0')}";
     if (auth.userData?['lastCallDate'] == today) {
       _startDailySeconds = (auth.userData?['dailyTalkSeconds'] as num?)?.toInt() ?? 0;
     }
@@ -198,8 +198,8 @@ class _ActiveCallScreenState extends State<ActiveCallScreen> with SingleTickerPr
           if (_secondsElapsed >= 10 * 60) {
             // 10 Min Hard Session Limit hit
             _endCallLocally(reason: 'limit_10_min');
-          } else if (!_isPremium && (_startDailySeconds + _secondsElapsed) >= 90 * 60) {
-            // 90 Min Global Daily Free Limit Hit
+          } else if (!_isPremium && (_startDailySeconds + _secondsElapsed) >= 60 * 60) {
+            // 60 Min (1 Hour) Global Daily Free Limit Hit
             _endCallLocally(reason: 'limit_daily');
           }
         });
@@ -296,11 +296,18 @@ class _ActiveCallScreenState extends State<ActiveCallScreen> with SingleTickerPr
         RTCSessionDescription offer = await _peerConnection!.createOffer(mediaConstraints);
         await _peerConnection!.setLocalDescription(offer);
         
+        final auth = context.read<AuthProvider>();
+        final myPhone = auth.appUser?.phoneNumber ?? auth.uid ?? "";
+        final partnerPhone = widget.partner.phoneNumber ?? widget.partner.uid;
+        
         await callDocRef.set({
           'offer': offer.toMap(),
           'status': 'active',
           'activeGameType': 'none',
           'createdAt': FieldValue.serverTimestamp(),
+          'participantIds': [myPhone, partnerPhone],
+          'participantNames': {myPhone: auth.appUser?.name ?? 'User', partnerPhone: widget.partner.name},
+          'participantAvatars': {myPhone: auth.appUser?.avatarUrl, partnerPhone: widget.partner.avatarUrl},
         }, SetOptions(merge: true));
       }
 
@@ -647,6 +654,8 @@ class _ActiveCallScreenState extends State<ActiveCallScreen> with SingleTickerPr
       _isShowingInviteDialog = false;
     }
     _cleanupResources();
+
+    debugPrint("[TalkTandem ActiveCallScreen] Call ended. Talked for $_secondsElapsed seconds.");
     
     Navigator.of(context).pushReplacement(
       MaterialPageRoute(
@@ -686,7 +695,7 @@ class _ActiveCallScreenState extends State<ActiveCallScreen> with SingleTickerPr
     
     int dailyRemaining = 0;
     if(!_isPremium) {
-       dailyRemaining = (90 * 60) - (_startDailySeconds + _secondsElapsed);
+       dailyRemaining = (60 * 60) - (_startDailySeconds + _secondsElapsed);
        if(dailyRemaining < 0) dailyRemaining = 0;
     }
 
@@ -921,6 +930,7 @@ class _ActiveCallScreenState extends State<ActiveCallScreen> with SingleTickerPr
                               color: AppTheme.tealAccent,
                               isActive: !_isMuted,
                               isLocal: true,
+                              isPremium: _isPremium,
                             ),
                           ),
                           const SizedBox(width: 16),
@@ -931,6 +941,7 @@ class _ActiveCallScreenState extends State<ActiveCallScreen> with SingleTickerPr
                               color: AppTheme.amberPremium,
                               isActive: _hasRemoteDescriptionSet,
                               isLocal: false,
+                              isPremium: widget.partner.isPremium,
                             ),
                           ),
                         ],
@@ -1004,6 +1015,7 @@ class _ActiveCallScreenState extends State<ActiveCallScreen> with SingleTickerPr
     required Color color,
     required bool isActive,
     required bool isLocal,
+    bool isPremium = false,
   }) {
     final textPrimary = AppTheme.getTextColor(context);
     final textSecondary = AppTheme.getSecondaryTextColor(context);
@@ -1023,60 +1035,121 @@ class _ActiveCallScreenState extends State<ActiveCallScreen> with SingleTickerPr
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Stack(
-            alignment: Alignment.center,
-            children: [
-              if (isActive)
-                AnimatedBuilder(
-                  animation: _soundWaveController,
-                  builder: (context, child) {
-                    final pulseValue = _soundWaveController.value;
-                    return Container(
-                      width: 64 + (pulseValue * 12),
-                      height: 64 + (pulseValue * 12),
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: color.withOpacity(0.15),
-                      ),
-                    );
-                  },
+          SizedBox(
+            width: 64,
+            height: 64,
+            child: Stack(
+              alignment: Alignment.center,
+              clipBehavior: Clip.none,
+              children: [
+                if (isActive)
+                  AnimatedBuilder(
+                    animation: _soundWaveController,
+                    builder: (context, child) {
+                      final pulseValue = _soundWaveController.value;
+                      return Container(
+                        width: 64 + (pulseValue * 12),
+                        height: 64 + (pulseValue * 12),
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: color.withOpacity(0.15),
+                        ),
+                      );
+                    },
+                  ),
+                CircleAvatar(
+                  radius: 32,
+                  backgroundImage: _getAvatarProvider(avatarUrl),
+                  backgroundColor: color.withOpacity(0.2),
+                  child: (avatarUrl == null || avatarUrl.isEmpty)
+                      ? Text(
+                          name.isNotEmpty ? name[0].toUpperCase() : '?',
+                          style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: color),
+                        )
+                      : null,
                 ),
-              CircleAvatar(
-                radius: 32,
-                backgroundImage: _getAvatarProvider(avatarUrl),
-                backgroundColor: color.withOpacity(0.2),
-                child: (avatarUrl == null || avatarUrl.isEmpty)
-                    ? Text(
-                        name.isNotEmpty ? name[0].toUpperCase() : '?',
-                        style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: color),
-                      )
-                    : null,
+                Positioned(
+                  bottom: 0,
+                  right: 0,
+                  child: Container(
+                    width: 14,
+                    height: 14,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: isActive ? AppTheme.emeraldGreen : Colors.grey,
+                      border: Border.all(color: surfaceColor, width: 2),
+                    ),
+                  ),
+                ),
+                if (isPremium)
+                  Positioned(
+                    top: 0,
+                    left: 0,
+                    child: Container(
+                      padding: const EdgeInsets.all(4),
+                      decoration: const BoxDecoration(
+                        color: AppTheme.amberPremium,
+                        shape: BoxShape.circle,
+                      ),
+                      child: const Icon(LucideIcons.crown, size: 10, color: Colors.white),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 12),
+          if (isPremium && !_hasRemoteDescriptionSet) ...[
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+              decoration: BoxDecoration(
+                color: AppTheme.amberPremium.withOpacity(0.15),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: AppTheme.amberPremium.withOpacity(0.4), width: 0.5),
               ),
-              Positioned(
-                bottom: 0,
-                right: 0,
-                child: Container(
-                  width: 14,
-                  height: 14,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: isActive ? AppTheme.emeraldGreen : Colors.grey,
-                    border: Border.all(color: surfaceColor, width: 2),
+              child: const Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(LucideIcons.crown, size: 8, color: AppTheme.amberPremium),
+                  SizedBox(width: 4),
+                  Text(
+                    "PREMIUM",
+                    style: TextStyle(
+                      color: AppTheme.amberPremium,
+                      fontSize: 8,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 6),
+          ],
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Flexible(
+                child: Text(
+                  name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.bold,
+                    color: textPrimary,
                   ),
                 ),
               ),
+              if (!isLocal) ...[
+                const SizedBox(width: 6),
+                CallFriendButton(
+                  myUid: context.read<AuthProvider>().uid ?? '',
+                  otherId: widget.partner.uid,
+                  otherName: widget.partner.name,
+                  otherAvatar: widget.partner.avatarUrl,
+                ),
+              ],
             ],
-          ),
-          const SizedBox(height: 12),
-          Text(
-            name,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(
-              fontSize: 14,
-              fontWeight: FontWeight.bold,
-              color: textPrimary,
-            ),
           ),
           Text(
             isLocal ? (_isMuted ? "Muted" : "Active mic") : (_hasRemoteDescriptionSet ? "Connected" : "Loading..."),
@@ -1564,6 +1637,137 @@ class _ActiveCallScreenState extends State<ActiveCallScreen> with SingleTickerPr
           ],
         ),
         child: Icon(icon, color: color, size: size * 0.4),
+      ),
+    );
+  }
+}
+
+class CallFriendButton extends StatefulWidget {
+  final String myUid;
+  final String otherId;
+  final String otherName;
+  final String? otherAvatar;
+  
+  const CallFriendButton({
+    super.key,
+    required this.myUid,
+    required this.otherId,
+    required this.otherName,
+    this.otherAvatar,
+  });
+
+  @override
+  State<CallFriendButton> createState() => _CallFriendButtonState();
+}
+
+class _CallFriendButtonState extends State<CallFriendButton> {
+  String? _status;
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadStatus();
+  }
+
+  Future<void> _loadStatus() async {
+    final auth = context.read<AuthProvider>();
+    final isFriend = List<String>.from(auth.userData?['friendIds'] ?? []).contains(widget.otherId);
+    if (isFriend) {
+      if (mounted) {
+        setState(() {
+          _status = 'friends';
+          _loading = false;
+        });
+      }
+      return;
+    }
+
+    final reqStatus = await auth.firestore.getFriendRequestStatus(
+      myUid: widget.myUid,
+      otherUid: widget.otherId,
+    );
+    if (mounted) {
+      setState(() {
+        _status = reqStatus;
+        _loading = false;
+      });
+    }
+  }
+
+  Future<void> _sendRequest() async {
+    final auth = context.read<AuthProvider>();
+    final me = auth.appUser;
+    if (me == null) return;
+    setState(() => _loading = true);
+    await auth.firestore.sendFriendRequest(
+      fromUid: widget.myUid,
+      me: me,
+      toUid: widget.otherId,
+      toName: widget.otherName,
+      toAvatar: widget.otherAvatar,
+    );
+    await _loadStatus();
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Friend request sent!')),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_loading) {
+      return const SizedBox(
+        width: 14,
+        height: 14,
+        child: CircularProgressIndicator(strokeWidth: 2, color: AppTheme.tealAccent),
+      );
+    }
+
+    if (_status == 'friends') {
+      return Container(
+        padding: const EdgeInsets.all(4),
+        decoration: BoxDecoration(
+          color: AppTheme.emeraldGreen.withOpacity(0.15),
+          shape: BoxShape.circle,
+        ),
+        child: const Icon(LucideIcons.userCheck, size: 12, color: AppTheme.emeraldGreen),
+      );
+    }
+
+    if (_status == 'sent') {
+      return Container(
+        padding: const EdgeInsets.all(4),
+        decoration: BoxDecoration(
+          color: AppTheme.amberPremium.withOpacity(0.15),
+          shape: BoxShape.circle,
+        ),
+        child: const Icon(LucideIcons.clock, size: 12, color: AppTheme.amberPremium),
+      );
+    }
+
+    if (_status == 'received') {
+      return Container(
+        padding: const EdgeInsets.all(4),
+        decoration: BoxDecoration(
+          color: AppTheme.tealAccent.withOpacity(0.15),
+          shape: BoxShape.circle,
+        ),
+        child: const Icon(LucideIcons.check, size: 12, color: AppTheme.tealAccent),
+      );
+    }
+
+    return InkWell(
+      onTap: _sendRequest,
+      borderRadius: BorderRadius.circular(12),
+      child: Container(
+        padding: const EdgeInsets.all(4),
+        decoration: BoxDecoration(
+          color: AppTheme.tealAccent.withOpacity(0.15),
+          shape: BoxShape.circle,
+        ),
+        child: const Icon(LucideIcons.userPlus, size: 12, color: AppTheme.tealAccent),
       ),
     );
   }

@@ -9,7 +9,7 @@ class AppUser {
   final String? location;
   final String? state;
   final List<String> interests;
-  final int xp;
+  final int coins;
   final int streak;
   final int conversationsCount;
   final int totalCalls;
@@ -29,7 +29,7 @@ class AppUser {
     this.location,
     this.state,
     this.interests = const [],
-    this.xp = 0,
+    this.coins = 0,
     this.streak = 0,
     this.conversationsCount = 0,
     this.totalCalls = 0,
@@ -51,7 +51,7 @@ class AppUser {
       location: data['location'] as String?,
       state: data['state'] as String?,
       interests: List<String>.from(data['interests'] ?? []),
-      xp: (data['xp'] as num?)?.toInt() ?? 0,
+      coins: (data['coins'] as num?)?.toInt() ?? 0,
       streak: (data['streak'] as num?)?.toInt() ?? 0,
       conversationsCount: (data['conversationsCount'] as num?)?.toInt() ?? 0,
       totalCalls: (data['totalCalls'] as num?)?.toInt() ??
@@ -75,7 +75,7 @@ class AppUser {
         'location': location ?? '',
         'state': state ?? '',
         'interests': interests,
-        'xp': xp,
+        'coins': coins,
         'streak': streak,
         'conversationsCount': conversationsCount,
         'totalCalls': totalCalls,
@@ -96,6 +96,8 @@ class Conversation {
   final String lastMessage;
   final DateTime? lastMessageAt;
   final Map<String, int> unreadCount;
+  final bool isRequest;
+  final String? requestSenderId;
 
   Conversation({
     required this.id,
@@ -105,6 +107,8 @@ class Conversation {
     this.lastMessage = '',
     this.lastMessageAt,
     this.unreadCount = const {},
+    this.isRequest = false,
+    this.requestSenderId,
   });
 
   factory Conversation.fromDoc(DocumentSnapshot doc) {
@@ -121,6 +125,8 @@ class Conversation {
           (k, v) => MapEntry(k, (v as num).toInt()),
         ),
       ),
+      isRequest: data['isRequest'] as bool? ?? false,
+      requestSenderId: data['requestSenderId'] as String?,
     );
   }
 
@@ -162,7 +168,7 @@ class LeaderboardEntry {
   final String uid;
   final String name;
   final String? avatarUrl;
-  final int xp;
+  final int coins;
   final int streak;
   final String? state;
 
@@ -170,7 +176,7 @@ class LeaderboardEntry {
     required this.uid,
     required this.name,
     this.avatarUrl,
-    required this.xp,
+    required this.coins,
     required this.streak,
     this.state,
   });
@@ -181,7 +187,7 @@ class LeaderboardEntry {
       uid: doc.id,
       name: data['name'] as String? ?? 'User',
       avatarUrl: data['avatarUrl'] as String?,
-      xp: (data['xp'] as num?)?.toInt() ?? 0,
+      coins: (data['coins'] as num?)?.toInt() ?? 0,
       streak: (data['streak'] as num?)?.toInt() ?? 0,
       state: data['state'] as String?,
     );

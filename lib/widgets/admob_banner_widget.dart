@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:google_mobile_ads/google_mobile_ads.dart';
 import 'package:lucide_icons/lucide_icons.dart';
+import 'package:provider/provider.dart';
 import '../theme/app_theme.dart';
+import '../models/auth_provider.dart';
 
 class AdmobBannerWidget extends StatefulWidget {
   const AdmobBannerWidget({super.key});
@@ -17,7 +19,15 @@ class _AdmobBannerWidgetState extends State<AdmobBannerWidget> {
   @override
   void initState() {
     super.initState();
-    _loadAd();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        final auth = context.read<AuthProvider>();
+        final isPremium = (auth.userData?['isPremium'] as bool?) ?? false;
+        if (!isPremium) {
+          _loadAd();
+        }
+      }
+    });
   }
 
   void _loadAd() {
@@ -56,6 +66,12 @@ class _AdmobBannerWidgetState extends State<AdmobBannerWidget> {
 
   @override
   Widget build(BuildContext context) {
+    final auth = context.watch<AuthProvider>();
+    final isPremium = (auth.userData?['isPremium'] as bool?) ?? false;
+    if (isPremium) {
+      return const SizedBox.shrink();
+    }
+
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final surfaceColor = AppTheme.getSurfaceColor(context);
     final borderColor = AppTheme.getBorderColor(context);

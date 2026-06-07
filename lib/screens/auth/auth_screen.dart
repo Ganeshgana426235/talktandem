@@ -853,6 +853,38 @@ class _AuthScreenState extends State<AuthScreen> {
         ),
         const SizedBox(height: 32),
 
+        if (context.watch<AuthProvider>().logoutReason != null) ...[
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            decoration: BoxDecoration(
+              color: Colors.red.withOpacity(0.08),
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: Colors.red.withOpacity(0.25)),
+            ),
+            child: Row(
+              children: [
+                const Icon(LucideIcons.alertTriangle, color: Colors.red, size: 20),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(
+                    context.watch<AuthProvider>().logoutReason!,
+                    style: const TextStyle(fontSize: 13, color: Colors.red, fontWeight: FontWeight.bold),
+                  ),
+                ),
+                IconButton(
+                  icon: const Icon(LucideIcons.x, color: Colors.red, size: 16),
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(),
+                  onPressed: () {
+                    context.read<AuthProvider>().clearLogoutReason();
+                  },
+                )
+              ],
+            ),
+          ),
+          const SizedBox(height: 24),
+        ],
+
         Text(
           titleText,
           style: TextStyle(fontSize: 24, fontStyle: FontStyle.normal, fontWeight: FontWeight.bold, color: textPrimary),
