@@ -6,6 +6,8 @@ import 'package:provider/provider.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart' hide AuthProvider;
+import 'package:lottie/lottie.dart'; // Swapped to the standard lottie package
+
 import '../../theme/app_theme.dart';
 import '../../models/auth_provider.dart';
 import '../auth/auth_screen.dart';
@@ -334,7 +336,16 @@ class _ProfileScreenState extends State<ProfileScreen> {
                       Text(name, style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: textPrimary)),
                       if (isPremiumUser) ...[
                         const SizedBox(width: 6),
-                        const Icon(LucideIcons.crown, color: AppTheme.amberPremium, size: 22),
+                        // Premium crown animation replacing the static Icon
+                        SizedBox(
+                          width: 28,
+                          height: 28,
+                          child: Lottie.asset(
+                            'lib/assets/animations/premium.json',
+                            fit: BoxFit.contain,
+                            errorBuilder: (context, error, stackTrace) => const Icon(Icons.error, color: Colors.red, size: 20),
+                          ),
+                        ),
                       ]
                     ],
                   ),
@@ -369,12 +380,13 @@ class _ProfileScreenState extends State<ProfileScreen> {
                     mainAxisSpacing: 10,
                     childAspectRatio: 1.05,
                     children: [
-                      _buildDashboardCard(context, LucideIcons.coins, coins, 'Total Coins', Colors.amber),
-                      _buildDashboardCard(context, LucideIcons.flame, streak, 'Streak', AppTheme.amberPremium),
-                      _buildDashboardCard(context, LucideIcons.award, maxStreak, 'Max Streak', Colors.redAccent),
-                      _buildDashboardCard(context, LucideIcons.phone, totalCalls, 'Calls Made', Colors.blueAccent),
-                      _buildDashboardCard(context, LucideIcons.clock, totalTalkText, 'Total Practice', Colors.deepPurpleAccent),
-                      _buildDashboardCard(context, LucideIcons.star, avgRating, 'Avg Rating', Colors.orangeAccent),
+                      // Updated to point to standard .json files
+                      _buildDashboardCard(context, 'lib/assets/animations/coin.json', coins, 'Total Coins'),
+                      _buildDashboardCard(context, 'lib/assets/animations/streak.json', streak, 'Streak'),
+                      _buildDashboardCard(context, 'lib/assets/animations/max_streak.json', maxStreak, 'Max Streak'),
+                      _buildDashboardCard(context, 'lib/assets/animations/call.json', totalCalls, 'Calls Made'),
+                      _buildDashboardCard(context, 'lib/assets/animations/time.json', totalTalkText, 'Total Practice'),
+                      _buildDashboardCard(context, 'lib/assets/animations/star.json', avgRating, 'Avg Rating'),
                     ],
                   ),
                   const SizedBox(height: 24),
@@ -475,11 +487,22 @@ class _ProfileScreenState extends State<ProfileScreen> {
                             Expanded(
                               child: Row(
                                 children: [
-                                  Icon(
-                                    isPremiumUser ? LucideIcons.crown : LucideIcons.sparkles,
-                                    color: isPremiumUser ? AppTheme.amberPremium : AppTheme.tealAccent,
-                                    size: 24,
-                                  ),
+                                  // Replaced the simple static icon with the animated Lottie for Premium users
+                                  isPremiumUser
+                                      ? SizedBox(
+                                          width: 28,
+                                          height: 28,
+                                          child: Lottie.asset(
+                                            'lib/assets/animations/premium.json',
+                                            fit: BoxFit.contain,
+                                            errorBuilder: (context, error, stackTrace) => const Icon(Icons.error, color: Colors.red, size: 20),
+                                          ),
+                                        )
+                                      : const Icon(
+                                          LucideIcons.sparkles,
+                                          color: AppTheme.tealAccent,
+                                          size: 24,
+                                        ),
                                   const SizedBox(width: 10),
                                   Expanded(
                                     child: Text(
@@ -641,7 +664,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
     );
   }
 
-  Widget _buildDashboardCard(BuildContext context, IconData icon, String value, String label, Color color) {
+  // Modified helper to take Lottie file path instead of IconData
+  Widget _buildDashboardCard(BuildContext context, String lottiePath, String value, String label) {
     final textPrimary = AppTheme.getTextColor(context);
     final textSecondary = AppTheme.getSecondaryTextColor(context);
     final surfaceColor = AppTheme.getSurfaceColor(context);
@@ -657,7 +681,15 @@ class _ProfileScreenState extends State<ProfileScreen> {
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Icon(icon, color: color, size: 20),
+          SizedBox(
+            width: 28,
+            height: 28,
+            child: Lottie.asset(
+              lottiePath,
+              fit: BoxFit.contain,
+              errorBuilder: (context, error, stackTrace) => const Icon(Icons.error, color: Colors.red, size: 20),
+            ),
+          ),
           const SizedBox(height: 6),
           FittedBox(
             child: Text(

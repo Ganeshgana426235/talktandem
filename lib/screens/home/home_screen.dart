@@ -5,6 +5,8 @@ import 'package:provider/provider.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart' hide AuthProvider;
+import 'package:lottie/lottie.dart'; // Imported Lottie package
+
 import '../../models/auth_provider.dart';
 import '../../theme/app_theme.dart';
 import '../matching/matching_screen.dart';
@@ -262,17 +264,19 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                   ),
                 ),
                 const Spacer(),
+                // Updated Streak Chip
                 _HeaderStatChip(
-                  icon: LucideIcons.flame,
+                  lottiePath: 'lib/assets/animations/streak.json',
                   label: currentStreak,
                   color: AppTheme.amberPremium,
                   surfaceColor: surfaceColor,
                   textColor: textPrimary,
                 ),
                 const SizedBox(width: 8),
+                // Updated Coin Chip
                 _HeaderStatChip(
-                  icon: LucideIcons.coins,
-                  label: '$currentCoins Coins',
+                  lottiePath: 'lib/assets/animations/coin.json',
+                  label: '$currentCoins ',
                   color: Colors.amber,
                   surfaceColor: surfaceColor,
                   textColor: textPrimary,
@@ -289,10 +293,15 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                         color: AppTheme.amberPremium.withOpacity(0.5),
                       ),
                     ),
-                    child: const Icon(
-                      LucideIcons.crown,
-                      size: 14,
-                      color: AppTheme.amberPremium,
+                    // Updated Premium Crown icon
+                    child: SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: Lottie.asset(
+                        'lib/assets/animations/premium2.json',
+                        fit: BoxFit.contain,
+                        errorBuilder: (context, error, stackTrace) => const Icon(LucideIcons.crown, size: 14, color: AppTheme.amberPremium),
+                      ),
                     ),
                   ),
                 ],
@@ -378,14 +387,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 }
 
 class _HeaderStatChip extends StatelessWidget {
-  final IconData icon;
+  final String lottiePath;
   final String label;
   final Color color;
   final Color surfaceColor;
   final Color textColor;
 
   const _HeaderStatChip({
-    required this.icon,
+    required this.lottiePath,
     required this.label,
     required this.color,
     required this.surfaceColor,
@@ -404,7 +413,16 @@ class _HeaderStatChip extends StatelessWidget {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(icon, color: color, size: 16),
+          // Render Lottie here
+          SizedBox(
+            width: 18,
+            height: 18,
+            child: Lottie.asset(
+              lottiePath,
+              fit: BoxFit.contain,
+              errorBuilder: (context, error, stackTrace) => Icon(Icons.error, color: color, size: 16),
+            ),
+          ),
           const SizedBox(width: 4),
           Text(
             label,
